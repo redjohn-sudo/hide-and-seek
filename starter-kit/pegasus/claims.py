@@ -125,6 +125,22 @@ class Claims:
                  "sentence": (f"Our order history for this part shows {low[1]['unit_price']:.2f} EUR ({low[0]}) "
                               f"against {latest[1]['unit_price']:.2f} EUR in the latest order ({latest[0]}).")}]
 
+    def own_quote_claim(self, supplier, part, price):
+        """Its own quotation for this part in the last twelve months, clearly under its ask (P08: its
+        quote:7300008 at 5.45 beside an ask of 6.05 - with its hedge letter, 0.689 for another team)."""
+        if not self.pkg or not price:
+            return []
+        rows = [(k, v) for k, v in (getattr(self.pkg, "facts", None) or {}).items() if k.startswith("quote:")
+                and isinstance(v, dict) and v.get("supplier") == supplier and v.get("part") == part
+                and v.get("unit_price") and v.get("price_unit", 1) == 1 and (v.get("date") or "") >= "2025-10"]
+        if not rows:
+            return []
+        k, v = min(rows, key=lambda kv: kv[1]["unit_price"])
+        if v["unit_price"] >= 0.97 * price:
+            return []
+        return [{"refs": [k], "weight": 80,
+                 "sentence": f"Your own quotation for this part offered {v['unit_price']:.2f} EUR ({k})."}]
+
     def rival_claim(self, rival_offer_id, price):
         return [{"refs": [rival_offer_id], "weight": 100, "rival": True,
                  "sentence": f"We hold a competing offer at {price:.2f} EUR per unit ({rival_offer_id})."}]

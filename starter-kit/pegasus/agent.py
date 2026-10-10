@@ -1361,6 +1361,13 @@ class PegasusAgent:
                 oc = self.fallback_claims.order_claim(sid, part, price)
             except Exception:
                 oc = []
+            try:
+                qc = self.fallback_claims.own_quote_claim(sid, part, price)
+            except Exception:
+                qc = []
+            if qc and not st.get("quote_claim_sent") and not any(set(c["refs"]) == set(qc[0]["refs"]) for c in chosen):
+                st["quote_claim_sent"] = True
+                chosen = qc + chosen  # its own earlier quotation leads
             if oc and not st.get("order_claim_sent") and not any(set(c["refs"]) == set(oc[0]["refs"]) for c in chosen):
                 st["order_claim_sent"] = True  # (the team filter drops po: claims; this one leads on purpose)
                 chosen = oc + chosen  # the order-history argument that moves distributors leads
@@ -1384,6 +1391,10 @@ class PegasusAgent:
             kept.append(c)
         chosen = kept[:cap]
         lines += [c["sentence"] for c in chosen]
+        share = self._share_line(case, sid, sheets) if k == 0 or st.get("offers", 0) == 2 else None
+        if share and not st.get("share_said"):
+            st["share_said"] = True
+            lines.append(share)
         lines += rules.lines(case, st, sheets)
         attachments, extra_refs = [], []
         asked_now = (latest(threads[sid]).get("body") or "").lower()
@@ -1499,6 +1510,26 @@ class PegasusAgent:
         if attachments:
             msg["attachments"] = attachments[:5]
         return msg
+
+    def _share_line(self, case, sid, sheets):
+        """It supplies only part of our need for this part (sourcing quota under 100 % beside another
+        active source): a binding longer commitment makes it first in line for a larger share - the
+        argument that moved P18 from 5.40 to 5.30 for another team."""
+        if not self.pkg:
+            return None
+        try:
+            rows = self.pkg.query("select supplier_id, status, quota_pct from sourcing where part_id = ?", (case["parts"][0],))
+        except Exception:
+            return None
+        rows = [list(r.values()) if isinstance(r, dict) else list(r) for r in rows]
+        mine = [r for r in rows if r[0] == sid and r[1] == "active"]
+        others = [r for r in rows if r[0] != sid and r[1] == "active" and (r[2] or 0) > 0]
+        if not mine or not others or (mine[0][2] or 0) >= 100:
+            return None
+        months = (sheets[0] if sheets else {}).get("contract_months")
+        term = f"{months}-month " if months else ""
+        return (f"Today you supply {int(mine[0][2])} % of our need for this part, another approved source the rest. "
+                f"A binding {term}commitment on these terms puts you first in line for a larger share.")
 
     def _forecast_evidence(self, case, part):
         """The latest forecast fact for the part and its monthly lines as a CSV attachment:
