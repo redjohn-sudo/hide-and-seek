@@ -55,7 +55,8 @@ MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one pa
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
-FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # one sheetless question after its final offer
+FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
+FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
 HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
 STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
@@ -844,12 +845,33 @@ class PegasusAgent:
         t = eco.cost(case, eco.sheet(case, s0, round(p, 2)), st["std"])
         return min(max(t, prev), c_s)
 
+    FINAL_ASKS = (
+        "Thank you for your final offer. We are close to placing the order. Before we sign, could you check once "
+        "more with your management whether this is truly the best price you can give us on these terms, for a "
+        "firm order today?",
+        "Thank you. We would like to award this business to you. Our approval committee meets today and asks for "
+        "one last improvement on the unit price - even a small step would let us sign at once.",
+        "We confirm the binding volume and the term in the attached terms of your offer, and we will pay every "
+        "invoice on its due date. With that certainty, is there any room left on the unit price?",
+        "We value the long-term relationship with you and want this to work for both sides. Could you look at "
+        "your price once more for a multi-year partner who orders without further discussion?",
+        "We are comparing the remaining offers before our final decision this afternoon. Is the price in your "
+        "offer your very last word, or can you still improve it so that we choose you?",
+        "Thank you for your patience. One last time: what is the lowest unit price at which you can confirm "
+        "these terms today? We are ready to accept immediately.",
+    )
+
     def _ask_after_final(self, case, threads, sid, st, busy):
-        """Use the rounds left after its final offer: once, a question without any sheet - no counter,
-        so nothing to walk away from - asking it to check once more. An RFQ bidder lowered its final
-        that way (P05 lot K: 30.00 -> 28.50); it never walked on a question. Skipped when one of its
-        own alternatives is better for us (mirroring it comes first) or when few rounds remain."""
-        if not FINAL_ASK or st.get("final_asked") or sid in busy or moves_left(case, threads[sid]) <= 2:
+        """Use every round left after its final offer (10 messages per thread; the leader played 31
+        rounds on the P05 RFQ): a question without any sheet each round - no counter, nothing to walk
+        away from - each with another reason, the cheapest rival offer cited in an RFQ; we accept on
+        our last message. A final came down that way (P05 lot K 30.00 -> 28.50, P10 lot S 31.50 ->
+        31.20, P07 5.52 -> 5.47). Skipped when one of its own alternatives is better for us
+        (mirroring it comes first)."""
+        if not FINAL_ASK or sid in busy or moves_left(case, threads[sid]) <= 1:
+            return None
+        n = st.get("final_asks", 0)
+        if n >= FINAL_ASK_MAX:
             return None
         events = threads[sid]
         sheet_id, terms = standing(events)
@@ -858,13 +880,31 @@ class PegasusAgent:
         if any(eco.ok(case, t, st["std"]) and eco.standing_cost(case, t, rel) < c_std - 1e-6
                for _, t in offered_ever(events) if _ not in self.mirrored):
             return None
+        st["final_asks"] = n + 1
         st["final_asked"] = True
-        log.info("%s %s: one question after its final offer", case["case_id"], sid)
-        return {"supplier_id": sid, "message": {
-            "subject": f"Re: {case['title']}",
-            "body": ("Thank you for your final offer. We are close to placing the order. Before we sign, could you "
-                     "check once more with your management whether this is truly the best price you can give us "
-                     "on these terms, for a firm order today?\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing")}}
+        body = self.FINAL_ASKS[n % len(self.FINAL_ASKS)]
+        refs = []
+        price = (terms or {}).get("unit_price")
+        rivals = []
+        for other in live_threads(threads):
+            if other == sid:
+                continue
+            oid, ot = standing(threads[other])
+            if oid and ot.get("unit_price") and price and ot["unit_price"] < price:
+                rivals.append((ot["unit_price"], oid))
+        if rivals:
+            p, oid = min(rivals)
+            used = st.setdefault("rivals_cited", set())
+            if oid not in used:
+                used.add(oid)
+                body = (f"We hold a competing offer at {p:.2f} EUR per unit ({oid}). " + body)
+                refs.append(oid)
+        log.info("%s %s: question %d after its final offer", case["case_id"], sid, n + 1)
+        msg = {"subject": f"Re: {case['title']}",
+               "body": f"{body}\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"}
+        if refs:
+            msg["refs"] = refs
+        return {"supplier_id": sid, "message": msg}
 
     def _agreed_below_bottom(self, case, threads, sid, st, status, terms, busy):
         """It agreed to a price under the bottom of the U (strategic supplier): the relationship
