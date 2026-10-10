@@ -53,7 +53,8 @@ ANCHOR_ALPHA = float(os.environ.get("PEGASUS_ANCHOR_ALPHA", "0.5"))
 MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
 MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
-TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
+TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
+CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
 PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
@@ -420,6 +421,9 @@ class PegasusAgent:
 
         if good_enough:
             return self._accept_best(case, threads, prefer=sid, busy=busy)
+        probe = self._clause_probe(case, threads, sid, st, status, terms, busy)
+        if probe:
+            return probe
         if status == "agreed":
             # It took our sheet: if that came within our first two offers we asked too little -
             # push once more from a lower anchor while rounds remain; else take it.
@@ -766,6 +770,65 @@ class PegasusAgent:
             return None
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
+
+    def _clause_probe(self, case, threads, sid, st, status, terms, busy):
+        """It agreed to a package with the index clause it wanted (P02: 361.21 / 90 days / CU clause
+        at once, 0.735 - the clause alone costs us 17.5 kEUR). Once, ask for the same package
+        without the clause, priced halfway between the agreed cost and the clause-free bottom; its
+        agreed offer stands meanwhile ("our agreed offer stands too"). Its answer is taken when it
+        costs us less than the agreed package; otherwise the agreed package goes back to it as our
+        sheet (it agreed to it once) and is taken."""
+        if not CLAUSE_PROBE or sid in busy:
+            return None
+        events = threads[sid]
+        rel = eco.with_relationship(st["std"])
+        pr = st.get("clause_probe")
+        if pr and not pr.get("done"):
+            pr["done"] = True
+            best = None
+            for oid, t in offered(events):
+                if eco.ok(case, t, st["std"]):
+                    c = eco.standing_cost(case, t, rel)
+                    if best is None or c < best[0]:
+                        best = (c, oid, t)
+            standing_id = standing(events)[0]
+            if best and best[0] <= pr["c_agreed"] + 1e-6 and best[1] == standing_id:
+                log.info("%s %s: clause probe answered at C=%.0f (agreed %.0f) - accept", case["case_id"], sid, best[0], pr["c_agreed"])
+                return {"supplier_id": sid, "message": {"action": {"type": "accept", "term_sheet_id": standing_id}}}
+            if status == "agreed" and standing_id and eco.standing_cost(case, terms, rel) <= pr["c_agreed"] + 1e-6:
+                return {"supplier_id": sid, "message": {"action": {"type": "accept", "term_sheet_id": standing_id}}}
+            log.info("%s %s: clause probe not better - back to the agreed package", case["case_id"], sid)
+            return {"supplier_id": sid, "message": {
+                "subject": f"Re: {case['title']}",
+                "body": ("Thank you. Then we stay with the package you agreed to: please confirm the attached "
+                         "term sheet and we place the order.\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"),
+                "term_sheets": [{"terms": pr["agreed"]}]}}
+        if pr or status != "agreed" or not terms or not terms.get("index_clause"):
+            return None
+        if None not in ((case.get("term_options") or {}).get("index_clause") or []) or moves_left(case, events) <= 3:
+            return None
+        structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
+        agreed = eco.sheet(case, structure, terms["unit_price"])
+        free = {**structure, "index_clause": None}
+        c_agreed = eco.standing_cost(case, agreed, rel)
+        hi = max(10 * terms["unit_price"], 1.0)
+        pb = eco.cheapest_price(case, free, rel, 0.01, hi)
+        c_bottom = eco.cost(case, eco.sheet(case, free, pb), rel)
+        if c_bottom >= c_agreed - 1e-6:
+            return None
+        p = eco.price_for(case, free, c_bottom + 0.5 * (c_agreed - c_bottom), rel)
+        sheet = eco.sheet(case, free, max(p, pb))
+        if not eco.ok(case, sheet, st["std"]):
+            return None
+        st["clause_probe"] = {"agreed": agreed, "c_agreed": c_agreed}
+        log.info("%s %s: agreed with a clause - probe without it at %.2f", case["case_id"], sid, sheet["unit_price"])
+        return {"supplier_id": sid, "message": {
+            "subject": f"Re: {case['title']}",
+            "body": ("Thank you for agreeing. One question before we place the order: our controlling prefers a "
+                     f"fixed price without the index clause. Could you confirm the attached fixed-price package at "
+                     f"{sheet['unit_price']:.2f} EUR per unit? If not, your agreed offer stands for us.\n\n"
+                     "Best regards\nHollerau Pumpenwerke GmbH, Purchasing"),
+            "term_sheets": [{"terms": sheet}]}}
 
     def _take_its_word(self, case, threads, sid, st, busy):
         """It writes a lower price in its prose than on its sheet ("I can offer you 28.00 EUR" beside
