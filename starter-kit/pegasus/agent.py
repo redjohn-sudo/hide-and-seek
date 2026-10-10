@@ -52,7 +52,8 @@ MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))
 ANCHOR_ALPHA = float(os.environ.get("PEGASUS_ANCHOR_ALPHA", "0.5"))
 MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
 MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
-NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"  # off: our cb 500 got its 300/cb0 ladder (0.794)
+NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
+TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
 PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
@@ -407,6 +408,9 @@ class PegasusAgent:
                 st["floor_hits"] = st.get("floor_hits", 0) + 1
             if st["last_signals"]:
                 log.info("%s %s heard: %s", case["case_id"], sid, sorted(st["last_signals"]))
+        said = self._take_its_word(case, threads, sid, st, busy)
+        if said:
+            return said
         if rules.must_close(st, case) and status != "agreed" and sheet_id:
             return self._done(case, threads, sid, st, busy)
 
@@ -762,6 +766,69 @@ class PegasusAgent:
             return None
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
+
+    def _take_its_word(self, case, threads, sid, st, busy):
+        """It writes a lower price in its prose than on its sheet ("I can offer you 28.00 EUR" beside
+        an agreed sheet at 28.79, P05 lots I and J): send its own terms back at the price it wrote -
+        its words, not a counter. Once per price; never a price we offered ourselves or a rival's."""
+        if not TAKE_ITS_WORD or sid in busy:
+            return None
+        events = threads[sid]
+        last = latest(events)
+        if last.get("from") == "buyer" or moves_left(case, events) <= 1:
+            return None
+        sheet_id, terms = standing(events)
+        if not sheet_id or not terms or not terms.get("unit_price"):
+            return None
+        p0 = terms["unit_price"]
+        ours = {round(t["terms"].get("unit_price") or 0, 2) for m in events if m.get("from") == "buyer"
+                for t in (m.get("term_sheets") or [])}
+        tried = st.setdefault("words_taken", set())
+        best = None
+        listed = {round(t["terms"].get("unit_price") or 0, 2) for t in (last.get("term_sheets") or [])}
+        std_terms = eco.closing_terms(case, terms, st["std"])
+
+        def same_terms(sentence):
+            """Every term the sentence names equals its standing offer's (else the price belongs to
+            another package: '4.87 for 14-day payment' beside a 90-day sheet)."""
+            if re.search(r"alternativ|clause|preisgleit|valid from|start date|incoterm", sentence, re.I):
+                return False
+            checks = [(r"(\d+)[ -]days?(?: net)?(?: payment| zahlungsziel)|zahlungsziel (\d+)|payment (?:terms )?of (\d+)", "payment_days"),
+                      (r"lieferzeit (\d+)|(\d+)[ -]days? (?:lead|delivery)", "lead_time_days"),
+                      (r"(\d+)[ -]months?", "contract_months"), (r"(\d+) ?ppm", "ppm_commitment"),
+                      (r"chargeback (?:of )?(?:€|eur )?(\d+)|(\d+) chargeback", "chargeback_eur_per_complaint")]
+            for rx, field in checks:
+                for g in re.findall(rx, sentence, re.I):
+                    v = next((x for x in (g if isinstance(g, tuple) else (g,)) if x), None)
+                    if v is not None and std_terms.get(field) is not None and float(v) != float(std_terms[field]):
+                        return False
+            return True
+
+        for sentence in re.split(r"(?<=[.!?])\s+", last.get("body") or ""):
+            if re.search(r"rival|competi|your (?:offer|price|proposal|package)|you (?:offer|propos|suggest)|order history|last year|previous", sentence, re.I):
+                continue
+            if not same_terms(sentence):
+                continue
+            for a1, a2 in re.findall(r"(\d+(?:\.\d{1,2})?) ?(?:EUR|euro)|€ ?(\d+(?:\.\d{1,2})?)", sentence):
+                p = float(a1 or a2)
+                if (0.85 * p0 <= p < p0 * 0.997 and round(p, 2) not in ours and round(p, 2) not in tried
+                        and round(p, 2) not in listed):
+                    best = p if best is None else min(best, p)
+        if best is None:
+            return None
+        structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
+        sheet = eco.sheet(case, structure, best)
+        rel = eco.with_relationship(st["std"])
+        if not eco.ok(case, sheet, st["std"]) or eco.standing_cost(case, sheet, rel) >= eco.standing_cost(case, terms, rel) - 1e-6:
+            return None
+        tried.add(round(best, 2))
+        log.info("%s %s: takes its word - %.2f written beside its sheet at %.2f", case["case_id"], sid, best, p0)
+        return {"supplier_id": sid, "message": {
+            "subject": f"Re: {case['title']}",
+            "body": (f"Thank you. You wrote that you can offer {best:.2f} EUR per unit on these terms. "
+                     "We accept that: the attached term sheet is your offer at that price. Please confirm it "
+                     "and we place the order.\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"),
+            "term_sheets": [{"terms": sheet}]}}
 
     def _nudge(self, case, threads, sid, st, busy):
         """Before taking an offer it still calls `open`: once, its own terms one tick under its
