@@ -42,7 +42,7 @@ PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price incre
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
-ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.97"))  # relationship cases: anchor >= this x floor  # keep the anchor structure within this share of the best price
+ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.945"))  # relationship cases: anchor >= this x floor (0.97 opened P01 at 129: 0.973)  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
 ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
@@ -366,7 +366,12 @@ class PegasusAgent:
 
         k = min(st["offers"], len(SCHEDULE) - 1)
         anchor = st["anchor"] if st["anchor"] is not None else c_s
+        if c_s <= anchor + 1e-6 and sheet_id:
+            # its standing offer already costs us no more than our opening demand: take it
+            return self._done(case, threads, sid, st, busy)
         target = anchor + SCHEDULE[k] * max(c_s - anchor, 0)
+        if st.get("last_target") is not None:
+            target = max(target, st["last_target"])  # concessions only go one way (P02/P01 lot E retreated)
         dc = direct_cost(events) if USE_FLOOR else None
         if dc and not st.get("floor_price"):
             st["floor_price"], st["floor_at"] = dc * (1 + FLOOR_MARGIN), st["offers"]
@@ -410,9 +415,15 @@ class PegasusAgent:
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
         now = [ts["terms"] for ts in msg.get("term_sheets") or []]
         if now and now == st.get("last_sheets"):
-            # every sheet is capped (floor or ask): repeating ourselves only irritates it - close
-            log.info("%s %s: sheets would repeat - closing", case["case_id"], sid)
-            return self._done(case, threads, sid, st, busy)
+            # every sheet is capped (floor or ask). While the supplier keeps moving, holding firm is
+            # the right move (P02 lot D: it came down to 358.95 against our floor); when it stalls
+            # too, repeating only irritates it ("you repeat your figures", P01) - close.
+            moved = len(st["seen"]) >= 2 and st["seen"][-1] < st["seen"][-2] - 1e-6
+            if not moved:
+                log.info("%s %s: sheets would repeat and it stopped moving - closing", case["case_id"], sid)
+                return self._done(case, threads, sid, st, busy)
+            for t in now:  # a token step so the message is not a verbatim repeat
+                t["unit_price"] = round(min(t["unit_price"] * 1.002, st.get("ask") or 1e18), 2)
         st["last_sheets"] = [dict(t) for t in now]
         for ts in msg.get("term_sheets") or []:  # what we have offered so far (for `remaining_trade`)
             st.setdefault("proposed", []).append({f: v for f, v in ts["terms"].items() if f != "unit_price"})
@@ -594,7 +605,9 @@ class PegasusAgent:
             # dearer one meanwhile (and do not accept a sheet that may be stale)
             return {"wait": True}
         c_open = self._c_open(case, threads)
-        if best and best[0] >= c_open - 0.002 * abs(c_open):
+        final = best and latest(threads[best[1]]).get("status") in ("final_offer", "agreed")
+        margin = 0.0 if final else 0.002  # after its last word, 'review your price' makes it walk (P02 lot E)
+        if best and best[0] >= c_open - margin * abs(c_open):
             # a deal not clearly cheaper than the best opening scores 0 (P02 lot A: estimated
             # 582 EUR below the opening, 2 902 EUR above it in the arena) - keep negotiating
             log.info("%s: best %.0f not clearly below the opening %.0f", case["case_id"], best[0], c_open)

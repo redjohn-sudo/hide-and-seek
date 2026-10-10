@@ -16,6 +16,7 @@ from .reader_cache import write_atomic
 
 FILE = Path(os.environ.get("PEGASUS_MEMORY", "data/supplier_memory.json"))
 _lock, _mem = threading.Lock(), {}
+PRIOR_MIN = int(os.environ.get("PEGASUS_PRIOR_MIN", "2"))  # one refusal is not a law (P11: chargeback 500 was accepted in another run)
 PRIOR_FLAGS = {"wants_faster_payment": "cash", "price_frozen": "freeze", "requires_index_clause": "wants_index",
                "lead_time_firm": "lead_firm", "chargeback_too_high": "cb_too_high",
                "wants_longer_contract": "wants_duration", "wants_volume_commitment": "wants_volume"}
@@ -42,7 +43,7 @@ def prior_flags(sid, case):
     neg = set(case.get("negotiable", []))
     out, stated = {}, {}
     for sig, flag in PRIOR_FLAGS.items():
-        if (m.get("signals") or {}).get(sig, 0) >= 1:
+        if (m.get("signals") or {}).get(sig, 0) >= PRIOR_MIN:
             field = {"cash": "payment_days", "wants_index": "index_clause", "lead_firm": "lead_time_days",
                      "cb_too_high": "chargeback_eur_per_complaint", "wants_duration": "contract_months",
                      "wants_volume": "volume_per_year"}.get(flag)
