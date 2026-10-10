@@ -1061,14 +1061,13 @@ class PegasusAgent:
     def _sheets(self, case, st, target):
         current = {k: v for k, v in eco.closing_terms(case, st.get("last_terms") or st["open"], st["std"]).items()
                    if k in eco.fields(case)}
-        if rules.active(st):  # the supplier stated a constraint: honour it in every sheet
-            picked = rules.pick_sheets(case, st, target, current, st.get("ask"))
-            if picked:
-                st["trade_offered"] = True
-                return picked
         if st.get("rel_structures"):
+            # strategic supplier: only the structures whose U bottom is best, whatever the rules' own
+            # ranking in plain C prefers (lot L P01: the rules path sent 90-day packages, 0.932)
             out = []
             for s in st["rel_structures"]:
+                if rules.active(st) and not rules.allowed(case, st, s, current):
+                    continue
                 p = eco.price_for(case, s, target, st["std"])
                 if st.get("ask"):
                     p = min(p, st["ask"])
@@ -1077,6 +1076,11 @@ class PegasusAgent:
                     out.append(t)
             if out:
                 return out
+        if rules.active(st):  # the supplier stated a constraint: honour it in every sheet
+            picked = rules.pick_sheets(case, st, target, current, st.get("ask"))
+            if picked:
+                st["trade_offered"] = True
+                return picked
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
         picks = self._prefer_anchor(case, st, target, eco.best_for_target(case, target, st["std"], current, st.get("ask"),
