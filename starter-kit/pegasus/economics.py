@@ -145,6 +145,38 @@ def implied_rate(sheets):
     return median(rates) if rates else None
 
 
+def acceptable_floor(case, structure, std, hi, alpha, c_open):
+    """Left of the bottom of the U: the price where C (relationship charge included) reaches
+    C_bottom + alpha x (c_open - C_bottom). An opening this deep still keeps 1 - alpha of the
+    saving should the supplier agree to it at once; it countered every deep opening so far (P01:
+    122.73 -> 0.998, 118.94 -> 0.995, while opening at the bottom 128.95 gave 0.949-0.956: it
+    splits the gap). The bottom itself when there is no saving to share."""
+    rel = with_relationship(std)
+    pb = cheapest_price(case, structure, rel, 0.01, hi)
+    cb = cost(case, sheet(case, structure, pb), rel)
+    limit = cb + alpha * max(c_open - cb, 0.0)
+    if limit <= cb + 1e-6:
+        return pb
+    return left_price(case, structure, std, hi, limit) or pb
+
+
+def left_price(case, structure, std, hi, limit):
+    """Left of the bottom of the U: the lowest price at which C (relationship charge included)
+    is at most `limit`; None when even the bottom costs more than `limit`."""
+    rel = with_relationship(std)
+    pb = cheapest_price(case, structure, rel, 0.01, hi)
+    if cost(case, sheet(case, structure, pb), rel) > limit + 1e-6:
+        return None
+    lo, p = 0.01, pb
+    for _ in range(50):
+        mid = (lo + p) / 2
+        if cost(case, sheet(case, structure, mid), rel) > limit:
+            lo = mid
+        else:
+            p = mid
+    return round(p, 2)
+
+
 def bottoms(case, ranked, std, hi):
     """Every ranked structure at the bottom of its U, cheapest first: [(C with the relationship
     charge, structure, bottom price)]. Which package is best for us once the supplier's margin

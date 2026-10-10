@@ -14,6 +14,7 @@ Per thread it
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -46,6 +47,12 @@ EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
 # strategic suppliers: a package may cost us at most this share of the best package's saving more than it
 MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))
+# strategic suppliers: how much of the saving an opening may give away if it were agreed at once
+# (0.5: P01 opens near 123 like the 0.998 run; 0 = open at the bottom of the U, 128.95: 0.949-0.956)
+ANCHOR_ALPHA = float(os.environ.get("PEGASUS_ANCHOR_ALPHA", "0.5"))
+MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
+MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0.025"))  # ... and at most this share of its price per round
+NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "1") == "1"
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
 PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
@@ -268,7 +275,6 @@ class PegasusAgent:
                 # structures, packages, floors and acceptance all in the same units (Kimi M1; lot I P01:
                 # packages priced in plain C drifted to 45/60-day payment the model knew were dearer)
                 st["std"]["_floor"] = sup
-                st["std"]["_supplier"] = sup
                 log.info("%s %s: supplier full cost estimate %.2f, cost of money %.1f %%", case["case_id"], sid,
                          sup["full_cost"], 100 * sup["interest_rate"])
             st["anchor"] = self._anchor(case, sid, st)
@@ -314,11 +320,19 @@ class PegasusAgent:
         if st["std"].get("_floor"):
             # strategic supplier: the structure whose U bottom is lowest once its margin counts, opened
             # at that bottom - every sheet we send must be one we can accept, it may agree to it at once
-            bottoms = eco.bottoms(case, ranked, st["std"], max(10 * open_p, 1.0))
+            hi = max(10 * open_p, 1.0)
+            bottoms = eco.bottoms(case, ranked, st["std"], hi)
             if bottoms:
-                _, s_b, p_b = bottoms[0]
+                c_b, s_b, p_b = bottoms[0]
+                c_open_rel = eco.standing_cost(case, st["open"], eco.with_relationship(st["std"]))
+                st["c_open_rel"] = c_open_rel
+                room = MESO_TOL * max(c_open_rel - c_b, 0.0)
+                # the packages we trade: the structures whose bottom is as good as the best one's
+                # (P01: 14-day payment with any start; never the 45/60-day ones the plain C likes)
+                st["rel_structures"] = [s for c, s, _ in bottoms if c <= c_b + room][:3]
                 st["anchor_structure"] = s_b
-                return eco.cost(case, eco.sheet(case, s_b, max(p, p_b)), st["std"])
+                p = max(p, eco.acceptable_floor(case, s_b, st["std"], hi, ANCHOR_ALPHA, c_open_rel))
+                return eco.cost(case, eco.sheet(case, s_b, p), st["std"])
         best = eco.best_at_price(case, expected, st["std"], cur)
         if best:
             st["anchor_structure"] = best[1]
@@ -483,16 +497,25 @@ class PegasusAgent:
         for ts in msg.get("term_sheets") or []:
             t = ts["terms"]
             s = {f: v for f, v in t.items() if f in eco.fields(case)}
-            floor = eco.price_floor(case, s, st["std"], max(10 * t["unit_price"], 1.0))
+            hi = max(10 * t["unit_price"], 1.0)
+            c_open_rel = st.get("c_open_rel") or eco.standing_cost(case, st["open"], rel)
+            floor = eco.acceptable_floor(case, s, st["std"], hi, ANCHOR_ALPHA, c_open_rel)
             if t["unit_price"] < floor:
                 t["unit_price"] = round(floor, 2)
             c_t = eco.standing_cost(case, t, rel)
             if c_s is not None and c_t > c_s + 1e-6:
-                # dearer for us than what it already offers (it may agree to it): cap this package at
-                # the price where it costs us what its offer costs - per package, 345 at 14 days with
-                # the clause is not 345 at 90 days fixed - and drop it when even its bottom is dearer
-                cap = eco.price_for(case, s, c_s, rel)
-                t["unit_price"] = round(max(min(t["unit_price"], cap), floor), 2)
+                # dearer for us than what it already offers (it may agree to it): move this package to
+                # the price where it costs us what its offer costs - up the left branch of the U when
+                # we are under the bottom (Codex r16: dropping it left mails without an offer), down
+                # the right branch when above - and drop it only when even its bottom is dearer
+                pb = eco.price_floor(case, s, st["std"], hi)
+                if t["unit_price"] < pb:
+                    p_left = eco.left_price(case, s, st["std"], hi, c_s)
+                    if p_left is None:
+                        continue
+                    t["unit_price"] = round(max(p_left, t["unit_price"]), 2)
+                else:
+                    t["unit_price"] = round(max(min(t["unit_price"], eco.price_for(case, s, c_s, rel)), pb), 2)
                 c_t = eco.standing_cost(case, t, rel)
                 if c_t > c_s + 1.0:
                     continue
@@ -524,9 +547,81 @@ class PegasusAgent:
         msg["term_sheets"] = kept
         return msg
 
+    def _polish(self, case, threads, sid, st, msg):
+        """General trims on every package we send (Kimi, lot I/J threads of the distributor bots):
+        an index clause always at the widest deadband the case allows (cheaper for us, still a
+        clause for it); no chargeback (a chargeback makes it re-price the whole package upwards:
+        P11 48.00 against 45.00); when its standing offer carries a clause under the widest
+        deadband, its own package at the widest deadband beside ours (it picks what is best for
+        it: the material risk moves to us only beyond the deadband); and a price step capped at
+        MAX_STEP of its price (a jump makes a distributor close early and high: P07 +0.22 -> final
+        5.52 at round 2, +0.08 -> 5.46 at round 4)."""
+        sheets = msg.get("term_sheets") or []
+        if not sheets:
+            return msg
+        opts = (case.get("term_options") or {}).get("index_clause") or []
+        widest = {}
+        for o in opts:
+            if o and o.get("series"):
+                widest[o["series"]] = max(widest.get(o["series"], -1), o.get("deadband_pct") or 0)
+        fields = eco.fields(case)
+        for ts in sheets:
+            t = ts["terms"]
+            ic = t.get("index_clause")
+            if ic and ic.get("series") in widest and (ic.get("deadband_pct") or 0) < widest[ic["series"]]:
+                t["index_clause"] = {**ic, "deadband_pct": widest[ic["series"]]}
+            if NO_CHARGEBACK and "chargeback_eur_per_complaint" in fields and (t.get("chargeback_eur_per_complaint") or 0) > 0:
+                t["chargeback_eur_per_complaint"] = 0.0
+        # the deadband mirror of its standing offer
+        sheet_id, standing_terms = standing(threads[sid])
+        ic = (standing_terms or {}).get("index_clause")
+        if (sheet_id and ic and ic.get("series") in widest and (ic.get("deadband_pct") or 0) < widest[ic["series"]]
+                and not st.get("deadband_mirrored")):
+            mirror = eco.sheet(case, {f: v for f, v in eco.closing_terms(case, standing_terms, st["std"]).items() if f in fields},
+                               standing_terms["unit_price"])
+            mirror["index_clause"] = {**ic, "deadband_pct": widest[ic["series"]]}
+            rel = eco.with_relationship(st["std"])
+            if (eco.ok(case, mirror, st["std"])
+                    and eco.standing_cost(case, mirror, rel) < eco.standing_cost(case, standing_terms, rel) - 1e-6):
+                st["deadband_mirrored"] = True
+                sheets = sheets[:2] + [{"terms": mirror}]
+                log.info("%s %s: deadband mirror %s", case["case_id"], sid, mirror)
+        # the step cap (not for strategic suppliers: their packages follow the U)
+        ask = st.get("ask")
+        if ask and not st["std"].get("_floor") and MAX_STEP > 0:
+            for ts in sheets:
+                t = ts["terms"]
+                same = [x.get("unit_price") for x in (st.get("last_sheets") or [])
+                        if {f: x.get(f) for f in fields} == {f: t.get(f) for f in fields}]
+                if same and t["unit_price"] > max(same) + MAX_STEP * ask:
+                    t["unit_price"] = round(max(same) + MAX_STEP * ask, 2)
+        # dedupe
+        seen, out = set(), []
+        for ts in sheets:
+            key = json.dumps(ts["terms"], sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(ts)
+        msg["term_sheets"] = out[:3]
+        return msg
+
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False, busy=(),
               closing=False):
-        msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
+        msg = self._polish(case, threads, sid, st,
+                           self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade)))
+        ask = st.get("ask")
+        for ts in msg.get("term_sheets") or []:
+            # a visible step on every package we repeat: "you only moved by one cent" makes it hold
+            # (lot J P01: 130.40 -> 130.46 -> 130.51, it held 133.80 three times)
+            t = ts["terms"]
+            same = [x.get("unit_price") for x in (st.get("last_sheets") or [])
+                    if {f: x.get(f) for f in eco.fields(case)} == {f: t.get(f) for f in eco.fields(case)}]
+            if same and t["unit_price"] > max(same) and t["unit_price"] < max(same) * (1 + MIN_VISIBLE):
+                p = max(same) * (1 + MIN_VISIBLE)
+                if ask:
+                    p = min(p, ask - max(0.01, 0.002 * ask))
+                if p > t["unit_price"]:
+                    t["unit_price"] = round(p, 2)
         now = [ts["terms"] for ts in msg.get("term_sheets") or []]
         if now and now == st.get("last_sheets"):
             # every sheet is capped (floor or ask). While the supplier keeps moving, holding firm is
@@ -690,6 +785,9 @@ class PegasusAgent:
         structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
         p = terms["unit_price"]
         price = round(p - max(0.01, 0.002 * p), 2)
+        shown = [t.get("unit_price") for _, t in offered_ever(events) if t.get("unit_price")]
+        if shown and min(shown) < price:
+            price = round(min(shown), 2)  # the bottom of the ladder it showed on another variant (P11: 45.00/1500 ppm)
         if st["std"].get("_floor") and price < eco.price_floor(case, structure, st["std"], max(10 * p, 1.0)):
             return None  # its price is already at our floor: take it
         ours = [ts.get("unit_price") for ts in (st.get("last_sheets") or [])
@@ -838,6 +936,17 @@ class PegasusAgent:
             if picked:
                 st["trade_offered"] = True
                 return picked
+        if st.get("rel_structures"):
+            out = []
+            for s in st["rel_structures"]:
+                p = eco.price_for(case, s, target, st["std"])
+                if st.get("ask"):
+                    p = min(p, st["ask"])
+                t = eco.sheet(case, s, p)
+                if eco.ok(case, t, st["std"]):
+                    out.append(t)
+            if out:
+                return out
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
         picks = self._prefer_anchor(case, st, target, eco.best_for_target(case, target, st["std"], current, st.get("ask"),
@@ -946,6 +1055,14 @@ class PegasusAgent:
                 log.warning("%s intel claims failed: %s", sid, e)
             if len(chosen) < 3:
                 chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
+        if k == 0:
+            try:
+                oc = self.fallback_claims.order_claim(sid, part, price)
+            except Exception:
+                oc = []
+            if oc and not (set(oc[0]["refs"]) & self.fallback_claims.used) and not any(set(c["refs"]) == set(oc[0]["refs"]) for c in chosen):
+                chosen = oc + chosen  # the order-history argument that moves distributors leads
+                self.fallback_claims.used |= set(oc[0]["refs"])
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         prev_their = st["seen"][-2] if len(st["seen"]) >= 2 else None
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:

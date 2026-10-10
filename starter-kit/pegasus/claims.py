@@ -104,6 +104,26 @@ class Claims:
                         "sentence": f"Your quality was {f['ppm']:.0f} ppm ({ids[-1]})."})
         return out
 
+    def order_claim(self, supplier, part, price):
+        """Our order history for this part at this supplier, lowest paid against the latest: the one
+        order-history argument that moved a bot (P18: -0.60 instead of -0.40 at round 1), cited only
+        when the lowest price is clearly under the current one (else "costs have gone up")."""
+        if not self.pkg or not price:
+            return []
+        rows = [(k, v) for k, v in (getattr(self.pkg, 'facts', None) or {}).items() if k.startswith("po:") and isinstance(v, dict)
+                and v.get("supplier") == supplier and v.get("part") == part and v.get("unit_price")
+                and v.get("price_unit", 1) == 1]
+        if len(rows) < 2:
+            return []
+        rows.sort(key=lambda kv: kv[1].get("date") or "")
+        low = min(rows, key=lambda kv: kv[1]["unit_price"])
+        latest = rows[-1]
+        if low[1]["unit_price"] >= 0.97 * price or low[0] == latest[0]:
+            return []
+        return [{"refs": [low[0], latest[0]], "weight": 60,
+                 "sentence": (f"Our order history for this part shows {low[1]['unit_price']:.2f} EUR ({low[0]}) "
+                              f"against {latest[1]['unit_price']:.2f} EUR in the latest order ({latest[0]}).")}]
+
     def rival_claim(self, rival_offer_id, price):
         return [{"refs": [rival_offer_id], "weight": 100, "rival": True,
                  "sentence": f"We hold a competing offer at {price:.2f} EUR per unit ({rival_offer_id})."}]
@@ -112,7 +132,7 @@ class Claims:
     def candidates(self, supplier, part, price, drivers_text=""):
         extra = DRIVER_RE.findall(drivers_text or "")
         out = (self.notice_claim() + self.index_claims(part, extra) + self.should_cost_claim(part, price)
-               + self.forecast_claim(part) + self.scorecard_claim(supplier))
+               + self.forecast_claim(part) + self.scorecard_claim(supplier) + self.order_claim(supplier, part, price))
         return sorted(out, key=lambda c: -c["weight"])
 
     def pick(self, supplier, part, price, drivers_text="", rivals=(), rivals_only=False, limit=MAX_PER_MESSAGE):
