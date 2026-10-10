@@ -35,11 +35,11 @@ def allowed(case, st, s, current):
         if not isinstance(ic, dict) or (ser and ic.get("series") != ser):
             return False
     if st.get("cb_too_high") and "chargeback_eur_per_complaint" in s:
-        cur = (current or {}).get("chargeback_eur_per_complaint")
+        cur = st.get("stated", {}).get("chargeback_eur_per_complaint", (current or {}).get("chargeback_eur_per_complaint"))
         if cur is not None and s["chargeback_eur_per_complaint"] >= cur:
             return False
     if st.get("lead_firm") and "lead_time_days" in s:
-        cur = (current or {}).get("lead_time_days")
+        cur = st.get("stated", {}).get("lead_time_days", (current or {}).get("lead_time_days"))
         if cur is not None and s["lead_time_days"] < cur:
             return False
     return True
