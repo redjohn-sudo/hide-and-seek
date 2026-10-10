@@ -63,6 +63,10 @@ def remember(sid, st, case, result=None):
         for sig in st.get("signals_read") or []:
             m["signals"][sig] = m["signals"].get(sig, 0) + 1
         m["stated"].update({k: v for k, v in (st.get("stated") or {}).items()})
+        if st.get("final_seen"):
+            # the reply that carried its final offer (1 = its first answer): it closes at a fixed point
+            prev = m.get("final_rounds") or []
+            m["final_rounds"] = (prev + [st["final_seen"]])[-10:]
         if result and result.get("deal") and result.get("supplier_id") == sid:
             m["deals"].append({"case": case.get("case_id"), "type": case.get("type"), "parts": case.get("parts"),
                                "opening": (st.get("open") or {}).get("unit_price"), "terms": result.get("terms"),
@@ -73,3 +77,10 @@ def remember(sid, st, case, result=None):
             write_atomic(FILE, _mem)
         except OSError:
             pass
+
+
+def final_round(sid):
+    """The reply at which this supplier usually sent its final offer (lower median of our earlier
+    negotiations with it)."""
+    r = sorted(recall(sid).get("final_rounds") or [])
+    return r[(len(r) - 1) // 2] if r else None

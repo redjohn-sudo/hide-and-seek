@@ -55,6 +55,7 @@ MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one pa
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
 HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
 STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
 STEP_HI = float(os.environ.get("PEGASUS_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
@@ -273,6 +274,7 @@ class PegasusAgent:
                 st.update(flags)
                 st.setdefault("stated", {}).update(stated)
                 log.info("%s %s: remembered %s %s", case["case_id"], sid, sorted(flags), stated)
+            st["final_round"] = memory.final_round(sid)
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
                                      self.pkg.facts if self.pkg else {}, sid)
             if sup:
@@ -424,6 +426,8 @@ class PegasusAgent:
 
         if good_enough:
             return self._accept_best(case, threads, prefer=sid, busy=busy)
+        if status == "final_offer" and not st.get("final_seen"):
+            st["final_seen"] = sum(1 for m in events if m.get("from") != "buyer") - 1
         probe = self._clause_probe(case, threads, sid, st, status, terms, busy)
         if probe:
             return probe
@@ -501,6 +505,7 @@ class PegasusAgent:
         if target_c is not None:
             target = min(target, target_c) if moves_left(case, events) > 3 else target
         target = self._paced(case, threads, sid, st, target, c_s)
+        target = self._before_final(case, threads, sid, st, target, c_s)
         if target >= c_s * (1 - 1e-4):
             return self._done(case, threads, sid, st, busy, converged=True)
         st["offers"] += 1
@@ -782,6 +787,30 @@ class PegasusAgent:
             return None
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
+
+    def _before_final(self, case, threads, sid, st, target, c_s):
+        """Our last offer before the reply that, in our earlier negotiations with this supplier,
+        carried its final offer: jump to JUMP under its standing price. Distributors close at a fixed
+        reply (P07 the 2nd, P04/P08/P18 the 3rd) a little under their standing price, whatever our
+        path; an offer near where they close can come back agreed, else they close where they
+        would have anyway (P08: final 5.37 against our 5.01; the record sits near 5.15-5.20)."""
+        fr = st.get("final_round")
+        if not fr or JUMP <= 0 or st["std"].get("_floor") or len(live_threads(threads)) > 1:
+            return target
+        replies = sum(1 for m in threads[sid] if m.get("from") != "buyer") - 1
+        if replies != fr - 1 or st.get("jumped"):
+            return target
+        s0 = st.get("anchor_structure")
+        if not s0:
+            return target
+        p_cs = eco.price_for(case, s0, c_s, st["std"])
+        jt = eco.cost(case, eco.sheet(case, s0, round(p_cs * (1 - JUMP), 2)), st["std"])
+        if jt > target:
+            st["jumped"] = True
+            log.info("%s %s: last offer before its usual final (reply %d) - %.2f", case["case_id"], sid, fr,
+                     p_cs * (1 - JUMP))
+            return min(jt, c_s)
+        return target
 
     def _paced(self, case, threads, sid, st, target, c_s):
         """One supplier, no relationship charge: the price of our main package moves between
