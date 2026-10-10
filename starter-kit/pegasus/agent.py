@@ -22,7 +22,7 @@ from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 
 from . import economics as eco
 from . import adapt as rules
-from . import guard, prose, reader
+from . import guard, memory, prose, reader
 
 try:  # Nevil's evidence lane (hollerau/evidence, PR #4): filtered claim union + planner hints
     from hollerau.evidence import adapter as team_claims
@@ -40,6 +40,8 @@ RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
 ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of the supplier's price
 PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
+EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
+ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
 ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
@@ -54,7 +56,7 @@ MIN_TFT = float(os.environ.get("PEGASUS_MIN_TFT", "0.05"))  # plus this share of
 # Three independent experiments; setting all three to 0 reproduces r9.
 CAPACITY_ANCHOR = float(os.environ.get("PEGASUS_CAPACITY_ANCHOR", "0.94"))
 APPROVAL_REVIEW = os.environ.get("PEGASUS_APPROVAL_REVIEW", "1") == "1"
-RFQ_BAFO = os.environ.get("PEGASUS_RFQ_BAFO", "1") == "1"
+RFQ_BAFO = os.environ.get("PEGASUS_RFQ_BAFO", "0") == "1"
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
     "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
@@ -170,6 +172,14 @@ class PegasusAgent:
             except Exception as e:  # reading is a bonus, never a reason to lose the round
                 log.warning("observe failed: %s", e)
 
+    def finish(self, case, threads, result=None):
+        """The case ended: keep what every supplier taught us."""
+        for sid, st in self.state.items():
+            try:
+                memory.remember(sid, st, case, result)
+            except Exception as e:
+                log.warning("memory failed for %s: %s", sid, e)
+
     def refuse(self, sheet_id):
         """The arena refused to close on this sheet: never try it again."""
         self.refused.add(sheet_id)
@@ -203,6 +213,11 @@ class PegasusAgent:
                 st["cash"] = "cash_sensitive" in kinds
                 st["freeze"] = "price_frozen" in kinds
                 st["signals"] = kinds
+            flags, stated = memory.prior_flags(sid, case)  # what this supplier taught us before
+            if flags or stated:
+                st.update(flags)
+                st.setdefault("stated", {}).update(stated)
+                log.info("%s %s: remembered %s %s", case["case_id"], sid, sorted(flags), stated)
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
                                      self.pkg.facts if self.pkg else {})
             if sup:
@@ -243,10 +258,15 @@ class PegasusAgent:
                 and lead and lead > b["need_lead_time_days"]):
             st["capacity_pressure"] = True
             p = max(p, open_p * min(CAPACITY_ANCHOR, 1.0))
-        # the structure is chosen at the price we will ask, not at the supplier's: at its price a
-        # short contract plus fallback can look cheaper (P08) while at ours full coverage wins
-        best = eco.best_at_price(case, p, st["std"])
-        return best[0] if best else eco.cost(case, eco.sheet(case, best_s, p), st["std"])
+        # the structure is chosen at the price the deal will likely close at (anchor + EXPECT of the
+        # gap to its ask): at its own price a short contract plus fallback looks cheaper (P08), at our
+        # anchor a November start looks cheaper (P01) - neither is where we will sign
+        expected = p + EXPECT * max(open_p - p, 0)
+        best = eco.best_at_price(case, expected, st["std"])
+        if best:
+            st["anchor_structure"] = best[1]
+            return eco.cost(case, eco.sheet(case, best[1], p), st["std"])
+        return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
     # -- decision ------------------------------------------------------------------------------
     def decide(self, case, threads, sid=None, busy=()):
@@ -372,7 +392,7 @@ class PegasusAgent:
 
     def _floored(self, case, st, msg):
         """Never offer under the price where the relationship charge outgrows the saving."""
-        if not st["std"].get("_floor"):
+        if not st["std"].get("_floor") or st.get("offers", 0) < 3:
             return msg
         for ts in msg.get("term_sheets") or []:
             t = ts["terms"]
@@ -384,6 +404,11 @@ class PegasusAgent:
 
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
+        now = [ts["terms"] for ts in msg.get("term_sheets") or []]
+        if now and now == st.get("last_sheets"):  # "your latest message repeats your previous figures" (P01)
+            for t in now:
+                t["unit_price"] = round(min(t["unit_price"] * 1.004, st.get("ask") or 1e18), 2)
+        st["last_sheets"] = [dict(t) for t in now]
         for ts in msg.get("term_sheets") or []:  # what we have offered so far (for `remaining_trade`)
             st.setdefault("proposed", []).append({f: v for f, v in ts["terms"].items() if f != "unit_price"})
         if prose.ENABLED and msg.get("body"):
@@ -583,6 +608,19 @@ class PegasusAgent:
         return {"supplier_id": prefer or live_threads(threads)[0], "message": {"action": {"type": "walk_away"}}}
 
     # -- the e-mail ----------------------------------------------------------------------------
+    def _prefer_anchor(self, st, picks):
+        """The structure chosen at the expected price stays the main sheet while its price is within
+        1 % of the best: the lever it carries (P01: April) is asked from the first e-mail on."""
+        a = st.get("anchor_structure")
+        if not a or not picks:
+            return picks
+        for i, (p, s) in enumerate(picks):
+            if s == a and i > 0:
+                if p >= ANCHOR_KEEP * picks[0][0]:
+                    return [picks[i]] + picks[:i] + picks[i + 1:]
+                break
+        return picks
+
     def _sheets(self, case, st, target):
         current = {k: v for k, v in eco.closing_terms(case, st.get("last_terms") or st["open"], st["std"]).items()
                    if k in eco.fields(case)}
@@ -593,8 +631,8 @@ class PegasusAgent:
                 return picked
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
-        picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"),
-                                   adapt=adapt, index_series=series, require_index=required)
+        picks = self._prefer_anchor(st, eco.best_for_target(case, target, st["std"], current, st.get("ask"),
+                                   adapt=adapt, index_series=series, require_index=required))
         if st.get("capacity_pressure") and picks:
             # Replace a cost-identical rush duplicate with a priced, feasible standard-lead
             # alternative. Keep the main package and the contract-length trade intact.

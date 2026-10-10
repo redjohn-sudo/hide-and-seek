@@ -36,7 +36,7 @@ def allowed(case, st, s, current):
             return False
     if st.get("cb_too_high") and "chargeback_eur_per_complaint" in s:
         cur = st.get("stated", {}).get("chargeback_eur_per_complaint", (current or {}).get("chargeback_eur_per_complaint"))
-        if cur is not None and s["chargeback_eur_per_complaint"] >= cur:
+        if cur is not None and (s["chargeback_eur_per_complaint"] > 0 if cur <= 0 else s["chargeback_eur_per_complaint"] >= cur):
             return False
     if st.get("lead_firm") and "lead_time_days" in s:
         cur = st.get("stated", {}).get("lead_time_days", (current or {}).get("lead_time_days"))

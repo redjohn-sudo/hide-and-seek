@@ -112,7 +112,10 @@ def play_case(table, case_id, agent, deadline=None):
 
     with ThreadPoolExecutor(max_workers=len(threads)) as pool:
         list(pool.map(worker, list(threads)))
-    return box.get("result") or table.result()
+    result = box.get("result") or table.result()
+    if hasattr(agent, "finish"):
+        agent.finish(case, threads, result)
+    return result
 
 
 def play_cases(client, case_ids, new_agent, parallel=5):

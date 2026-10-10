@@ -88,7 +88,8 @@ KEYWORDS = {
         r"not our reality|already (?:been )?(?:fully )?(?:taken|factored)|"
         r"(?:data|figures|records).{0,35}(?:does not concern|do not match|do not exist|do not warrant)|"
         r"(?:points|arguments).{0,30}do not introduce new factors|cannot give up margin right now"),
-    "chargeback_too_high": r"(?:chargeback|penalty).{0,40}(?:too much|too high|way too)|(?:too high|too much).{0,25}(?:chargeback|penalty)",
+    "chargeback_too_high": (r"(?:chargeback|penalty).{0,40}(?:too much|too high|way too)|(?:too high|too much).{0,25}(?:chargeback|penalty)|"
+        r"(?:can't|cannot|do not|don't|won't|not) (?:accept|do|take|work with) (?:any )?(?:chargebacks?|penalt)|zero chargebacks?|no chargebacks?|chargebacks?.{0,25}(?:don't|do not) work"),
     "lead_time_firm": (r"(?:maintain|keep|set|adjust).{0,28}(?:lead time|lieferzeit).{0,65}(?:must|quality|reliable|rush costs)|"
         r"(?:must|have to|need to|provided we).{0,35}(?:maintain|keep|set|adjust).{0,30}(?:lead time|lieferzeit)|"
         r"earliest (?:possible |firm )?(?:lead time|lieferzeit|delivery)|"
@@ -111,6 +112,8 @@ AFFIRMATIVE = {"requires_index_clause", "wants_faster_payment", "wants_volume_co
                "wants_longer_contract", "free_capacity", "needs_internal_approval", "capacity_tight"}
 VALUED = {"cost_floor": "unit_price", "lead_time_firm": "lead_time_days",
           "chargeback_too_high": "chargeback_eur_per_complaint"}
+UNITS = {"lead_time_days": r"days?|tage|working days", "chargeback_eur_per_complaint": r"eur|€",
+         "unit_price": r"eur|€"}
 VERSION = reader_cache.fingerprint([SYSTEM, json.dumps(SCHEMA, sort_keys=True)])
 
 
@@ -125,14 +128,22 @@ class Signals(set):
 def validate(sig, line, quote):
     """(accepted, value or None): a denied quote confirms no affirmative signal; a stated number
     must be on the cited line."""
-    if sig.get("type") in AFFIRMATIVE and NEGATION.search(quote):
+    kind = sig.get("type")
+    if kind in AFFIRMATIVE and NEGATION.search(quote):
+        return False, None
+    if kind == "cost_floor" and re.search(r"\bno (?:absolute )?(?:limit|bottom)|\bnot (?:our |the )?(?:bottom line|absolute limit|limit)", quote, re.I):
         return False, None
     value = sig.get("value")
-    if sig.get("type") in VALUED and value is not None:
-        numbers = [float(x.replace(",", ".")) for x in NUMBER.findall(line)]
-        if not any(abs(n - float(value)) < 1e-6 for n in numbers):
+    if kind in VALUED and value is not None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
             return False, None
-        return True, float(value)
+        unit = UNITS[VALUED[kind]]
+        near = re.compile(r"(?<![\d.,])" + re.escape(f"{v:g}") + r"(?![\d])\s*(?:%s)" % unit + "|" + r"(?:%s)\s*" % unit + re.escape(f"{v:g}") + r"(?![\d])", re.I)
+        if not near.search(line.replace("\u202f", " ")):
+            return False, None  # the number is on the line but not with its unit (54 EUR is not 54 days)
+        return True, v
     return True, None
 
 
@@ -208,8 +219,14 @@ def read(text):
     except Exception as e:
         log.warning("reader LLM failed (%s) - keywords only", e)
         return found
-    for sig in out.get("signals", []):
-        line = lines.get(sig.get("line", ""))
+    try:
+        signals = list(out.get("signals") or []) if isinstance(out, dict) else []
+    except Exception:
+        signals = []
+    for sig in signals:
+        if not isinstance(sig, dict):
+            continue
+        line = lines.get(str(sig.get("line", "")))
         quote = " ".join((sig.get("quote") or "").split())
         if not (sig.get("type") in TYPES and line and quote and quote.lower() in line.lower()):
             log.info("reader: rejected unverified %s", sig.get("type"))
