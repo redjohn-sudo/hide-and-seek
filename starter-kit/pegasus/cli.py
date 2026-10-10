@@ -32,9 +32,18 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO if a.v else logging.WARNING, format="%(asctime)s %(message)s",
                         datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    pkg = DataPackage(os.environ.get("ARENA_DATA", "data/package"))
+    data_dir = os.environ.get("ARENA_DATA", "data/package")
+    base = DataPackage(data_dir)  # fail now, before any session opens, if the package is missing
+    index = base._ids  # the ID index, built once here: read-only from now on, so the agents can share it
+
+    def package():
+        """One package per agent (Nevil, team PR #9): a DataPackage holds a single SQLite connection,
+        not safe to share between the parallel cases ("no such table: None"); the ID index is shared."""
+        pk = DataPackage(data_dir)
+        pk.__dict__["_ids"] = index  # a cached_property lives in the instance's __dict__
+        return pk
     playbook = json.load(open(a.playbook)) if a.playbook else {}
-    new_agent = lambda: PegasusAgent(pkg, playbook, a.push_after_final)  # noqa: E731
+    new_agent = lambda: PegasusAgent(package(), playbook, a.push_after_final)  # noqa: E731
     client = ArenaClient()
     if a.set == "final":
         results = play_waves(client, new_agent, parallel=a.parallel)
