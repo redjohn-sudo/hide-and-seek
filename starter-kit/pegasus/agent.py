@@ -13,6 +13,7 @@ Per thread it
 `playbook` (optional): per case, a known target C (e.g. C_best learnt from a practice replay).
 """
 
+import base64
 import logging
 import os
 import re
@@ -43,7 +44,21 @@ MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap
 RFQ_CAP = float(os.environ.get("PEGASUS_RFQ_CAP", "0.995"))   # a bidder never gets a target above this x the best rival
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
-MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))  # strategic suppliers: a package may cost us at most this share of the best package's saving more (it picks)
+# strategic suppliers: a package may cost us at most this share of the best package's saving more than it
+MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))
+# push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
+PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
+# one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
+NUDGE = os.environ.get("PEGASUS_NUDGE", "1") == "1"
+# answer its "which figures is that based on?" with the forecast fact and its monthly lines as a CSV
+SUBSTANTIATE = os.environ.get("PEGASUS_SUBSTANTIATE", "1") == "1"
+QUESTION_RE = re.compile(
+    r"which figures|underlying (?:data|forecast)|forecast data|consumption data|substantiat"
+    r"|(?:what|which) volume (?:can|could|will) you commit|binding (?:volume|release)"
+    r"|share (?:the|this|your|corresponding|such) [a-z ]{0,20}(?:data|figures|forecast)"
+    r"|data (?:behind|supporting|confirming)"
+    r"|provide (?:the |your )?(?:actual |underlying )?(?:data|figures|forecasts?)"
+    r"|based on\?|which data")
 ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
@@ -321,7 +336,17 @@ class PegasusAgent:
         sheet_id, terms = standing(events)
         offers = [eco.standing_cost(case, t, st["std"]) for _, t in offered(events) if eco.ok(case, t, st["std"])]
         c_s = min(offers) if offers else float("inf")
-        rel = [eco.standing_cost(case, t, eco.with_relationship(st["std"])) for _, t in offered(events) if eco.ok(case, t, st["std"])]
+        sup = st["std"].get("_floor")
+        if sup and last.get("from") != "buyer":
+            r = eco.implied_rate([t for _, t in offered(events)])
+            if r is not None:
+                # its own payment pairs outweigh our prior from the correspondence (2:1)
+                prior = sup.setdefault("prior_rate", sup["interest_rate"])
+                sup["interest_rate"] = round(min(max(0.67 * r + 0.33 * prior, 0.03), 0.15), 4)
+                log.info("%s %s: implied cost of money %.1f %% -> model %.1f %%", case["case_id"], sid,
+                         100 * r, 100 * sup["interest_rate"])
+        rel = [eco.standing_cost(case, t, eco.with_relationship(st["std"]))
+               for _, t in offered(events) if eco.ok(case, t, st["std"])]
         st["c_s_rel"] = min(rel) if rel else None
         if (terms or {}).get("unit_price"):
             st["ask"] = terms["unit_price"]
@@ -365,7 +390,8 @@ class PegasusAgent:
             # It took our sheet: if that came within our first two offers we asked too little -
             # push once more from a lower anchor while rounds remain; else take it.
             behind_target = target_c is not None and c_s > target_c
-            if (st["offers"] <= 2 or behind_target) and not st.get("pushed_agreed") and moves_left(case, events) > 3:
+            if (PUSH_AGREED and (st["offers"] <= 2 or behind_target) and not st.get("pushed_agreed")
+                    and moves_left(case, events) > 3):
                 st["pushed_agreed"] = True
                 c_open = eco.standing_cost(case, st["open"], st["std"])
                 st["anchor"] = min(st["anchor"] or c_s, c_s) - 0.5 * max(c_open - c_s, 0)
@@ -443,13 +469,18 @@ class PegasusAgent:
             s = {f: v for f, v in t.items() if f in eco.fields(case)}
             floor = eco.price_floor(case, s, st["std"], max(10 * t["unit_price"], 1.0))
             if t["unit_price"] < floor:
-                # the cap is per package: the price at which this package costs us what its
-                # standing offer costs us (345 at 14 days + index is not 345 at 90 days fixed)
-                cap = eco.price_for(case, s, c_s, rel) if c_s else floor
-                if cap < floor - 0.005:
-                    continue  # this package cannot beat its offer for us: do not send it
-                t["unit_price"] = round(min(floor, cap), 2)
-            kept.append((eco.standing_cost(case, t, rel), ts))
+                t["unit_price"] = round(floor, 2)
+            c_t = eco.standing_cost(case, t, rel)
+            if c_s is not None and c_t > c_s + 1e-6:
+                # dearer for us than what it already offers (it may agree to it): cap this package at
+                # the price where it costs us what its offer costs - per package, 345 at 14 days with
+                # the clause is not 345 at 90 days fixed - and drop it when even its bottom is dearer
+                cap = eco.price_for(case, s, c_s, rel)
+                t["unit_price"] = round(max(min(t["unit_price"], cap), floor), 2)
+                c_t = eco.standing_cost(case, t, rel)
+                if c_t > c_s + 1.0:
+                    continue
+            kept.append((c_t, ts))
         if kept:
             # The supplier picks the package best for IT. Floored at their own bottoms the packages
             # no longer cost us the same: on P02 the 14-day + index clause package it "agreed" to
@@ -459,10 +490,24 @@ class PegasusAgent:
             c_open = eco.standing_cost(case, st["open"], rel)
             room = MESO_TOL * max(c_open - c_best, 0.0)
             kept = [ts for c, ts in kept if c <= c_best + room]
+            series = (st.get("index_preference") or (None, False))[0]
+            if (series and len(kept) < 3 and st.get("ranked")
+                    and not any((ts["terms"].get("index_clause") or {}).get("series") == series for ts in kept)):
+                # It wants this clause (its cost drivers, its reply) and gives its best prices with it
+                # (P02: 355.93 with the CU clause, 367-372 without). Offer it once, on the structure
+                # whose U bottom is lowest WITH the clause, at that bottom - never the 14-day variant
+                # it would pick otherwise (0.59 against 0.73 at 90 days).
+                with_clause = [x for x in st["ranked"] if (x[1].get("index_clause") or {}).get("series") == series]
+                hi = max(10 * (st.get("ask") or st["open"].get("unit_price") or 1.0), 1.0)
+                cands = eco.bottoms(case, with_clause, st["std"], hi) if with_clause else []
+                if cands and (c_s is None or cands[0][0] < c_s - 1e-6):
+                    _, s, p = cands[0]
+                    kept.append({"terms": eco.sheet(case, s, p)})
         msg["term_sheets"] = kept
         return msg
 
-    def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False, busy=()):
+    def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False, busy=(),
+              closing=False):
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
         now = [ts["terms"] for ts in msg.get("term_sheets") or []]
         if now and now == st.get("last_sheets"):
@@ -471,6 +516,8 @@ class PegasusAgent:
             # too, repeating only irritates it ("you repeat your figures", P01) - close.
             moved = len(st["seen"]) >= 2 and st["seen"][-1] < st["seen"][-2] - 1e-6
             if not moved:
+                if closing:
+                    return None  # called from the closing path itself: nothing new to send (Codex r14: a cycle)
                 log.info("%s %s: sheets would repeat and it stopped moving - closing", case["case_id"], sid)
                 return self._done(case, threads, sid, st, busy)
             st["held"] = st.get("held", 0) + 1  # same prices on purpose; subject and wording differ
@@ -603,10 +650,56 @@ class PegasusAgent:
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
 
+    def _nudge(self, case, threads, sid, st, busy):
+        """Before taking an offer it still calls `open`: once, its own terms one tick under its
+        price. It agrees or holds - a walk was never seen before a final offer - and the tick is
+        worth a lot where its last price sits near the best achievable (P04: 4.93 scores 1.000,
+        its 4.94 scored 0.860). Never under the relationship floor, never after a final offer."""
+        events = threads[sid]
+        last = latest(events)
+        if not NUDGE or st.get("nudged") or last.get("status") != "open" or sid in busy:
+            return None
+        if moves_left(case, events) <= 2:
+            return None
+        sheet_id, terms = standing(events)
+        if not sheet_id or not terms or not terms.get("unit_price") or not eco.ok(case, terms, st["std"]):
+            return None
+        rel = eco.with_relationship(st["std"])
+        c_std = eco.standing_cost(case, terms, rel)
+        if any(eco.ok(case, t, st["std"]) and eco.standing_cost(case, t, rel) < c_std - 1e-6
+               for _, t in offered(events)[1:]):
+            return None  # a better alternative of its own is on the table: mirror that instead
+        structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
+        p = terms["unit_price"]
+        price = round(p - max(0.01, 0.002 * p), 2)
+        if st["std"].get("_floor") and price < eco.price_floor(case, structure, st["std"], max(10 * p, 1.0)):
+            return None  # its price is already at our floor: take it
+        ours = [ts.get("unit_price") for ts in (st.get("last_sheets") or [])
+                if {f: ts.get(f) for f in structure} == structure]
+        if ours and max(ours) >= price - 1e-9:
+            return None  # we already offered that
+        st["nudged"] = True
+        st["offers"] += 1
+        target = eco.cost(case, eco.sheet(case, structure, price), st["std"])
+        st["last_target"] = max(st.get("last_target") or 0.0, target)
+        out = self._send(case, threads, sid, st, target, min(st["offers"], len(SCHEDULE) - 1),
+                         sheets=[eco.sheet(case, structure, price)], busy=busy)
+        if out and out.get("message", {}).get("term_sheets"):
+            body = out["message"].get("body", "")
+            out["message"]["body"] = body.replace("We value our cooperation.",
+                f"We are ready to close: if you can confirm {price:.2f} EUR per unit on the attached terms, "
+                "we place the order today.\nWe value our cooperation.", 1)
+            log.info("%s %s: nudge %.2f under its %.2f", case["case_id"], sid, price, p)
+            return out
+        return None
+
     def _done(self, case, threads, sid, st, busy):
         """This thread has gone as far as it will. In an RFQ, keep it alive with a question while
         another bidder is still moving (its offer is our best lever on them); close when no
         thread can still improve."""
+        nudge = self._nudge(case, threads, sid, st, busy)
+        if nudge:
+            return nudge
         st["done"] = True
         live = live_threads(threads)
         still_moving = [s for s in live if s != sid and not (self.state.get(s) or {}).get("done")
@@ -674,7 +767,7 @@ class PegasusAgent:
                 st2["offers"] += 1
                 k2 = min(st2["offers"], len(SCHEDULE) - 1)
                 tgt = st2.get("last_target") or best[0]
-                out = self._send(case, threads, s_id, st2, tgt, k2, busy=busy)
+                out = self._send(case, threads, s_id, st2, tgt, k2, busy=busy, closing=True)
                 if out and out.get("message", {}).get("term_sheets"):
                     return out
         if best and best[0] < self.c_alt:
@@ -836,6 +929,20 @@ class PegasusAgent:
         chosen = chosen[:cap]
         lines += [c["sentence"] for c in chosen]
         lines += rules.lines(case, st, sheets)
+        attachments, extra_refs = [], []
+        asked_now = (latest(threads[sid]).get("body") or "").lower()
+        if SUBSTANTIATE and not st.get("substantiated") and QUESTION_RE.search(asked_now):
+            # Its scripted question ("which figures is that based on?", "share the consumption data")
+            # gates its next step; unanswered it closes worse or walks (P18). The forecast fact and
+            # its monthly lines as a CSV attachment - read by the bot, no claim slot used.
+            sentence, ref, att = self._forecast_evidence(case, part)
+            if sentence:
+                lines.append(sentence)
+                st["substantiated"] = True
+                if ref:
+                    extra_refs.append(ref)
+                if att:
+                    attachments.append(att)
         if not sheets:
             lines.append("Could you confirm a feasible package using the allowed terms?")
         if final_trade:
@@ -853,8 +960,9 @@ class PegasusAgent:
         if st.get("cash") and "payment_days" in case["negotiable"]:
             lines.append("We are happy to pay faster if that helps your cash flow, in exchange for a better price.")
         elif st.get("cash") and case.get("fixed_terms", {}).get("payment_days") is not None:
-            lines.append(f"The enquiry fixes payment at {case['fixed_terms']['payment_days']} days net; "
-                         "the attached packages therefore trade only the negotiable terms.")
+            # not "the enquiry fixes payment at 60 days": the bot quotes it back as its excuse to hold
+            # (P11: "since you can't change the 60 days payment, we don't have much more room")
+            lines.append("We will pay every invoice on its due date, without exception.")
         if len(sheets) > 1:
             lines.append("Each of the attached packages works for us; please choose the one that suits you best.")
         # State the binding commitment the sheets carry - suppliers ask for it (P02: "Which volume
@@ -920,8 +1028,45 @@ class PegasusAgent:
         lines += ["We value our cooperation.", "",
                   "Best regards", "Hollerau Pumpenwerke GmbH, Purchasing"]
         refs = [r for c in chosen for r in c["refs"]]
+        refs += [r for r in extra_refs if r not in set(refs)]
         msg = {"subject": f"Re: {case['title']}" + (f" [{NONCE}]" if NONCE else ""), "body": "\n".join(lines),
                "term_sheets": [{"terms": t} for t in sheets]}
         if refs:
             msg["refs"] = refs[:20]
+        if attachments:
+            msg["attachments"] = attachments[:5]
         return msg
+
+    def _forecast_evidence(self, case, part):
+        """The latest forecast fact for the part and its monthly lines as a CSV attachment:
+        (sentence, fact id, attachment) - (None, None, None) without a forecast."""
+        if not self.pkg:
+            return None, None, None
+        try:
+            ids = self.pkg.ids(f"fc:{part.split(':')[1]}@")
+            fid = ids[-1] if ids else None
+            f = self.pkg.lookup(fid) if fid else None
+            if not f:
+                return None, None, None
+            rows = self.pkg.query("select target_month, qty from forecast_lines where fc_id = ? order by target_month",
+                                  (fid,))
+        except Exception as ex:
+            log.warning("%s: forecast evidence failed: %s", case["case_id"], ex)
+            return None, None, None
+        qty = f.get("qty_next_12m") or f.get("volume_per_year")
+        pct = f.get("change_pct")
+        bits = []
+        if qty:
+            bits.append(f"{int(qty)} pcs per year")  # no thousands separator: the guard reads 4,580 as two figures
+        if pct is not None:
+            bits.append(f"{pct:+.1f}% against the previous plan")
+        sentence = (f"To substantiate our volume commitment: our official forecast {fid} shows "
+                    + (", ".join(bits) if bits else "the demand we commit to") + ".")
+        att = None
+        if rows:
+            vals = [list(r.values()) if isinstance(r, dict) else list(r) for r in rows]
+            csv = "month,qty,source\n" + "\n".join(f"{v[0]},{v[1]},{fid}" for v in vals)
+            att = {"name": "forecast-plan.csv", "type": "csv",  # no digits in the name: the guard reads them as figures
+                   "content_b64": base64.b64encode(csv.encode()).decode()}
+            sentence += f" The attached {att['name']} lists the monthly demand plan we release to our suppliers."
+        return sentence, fid, att

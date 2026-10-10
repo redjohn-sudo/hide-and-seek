@@ -38,7 +38,7 @@ def _figure_ok(sentence, refs, facts):
         return any(abs(n - change) <= 0.5 for n in nums)
     expected = []
     for v in vals:
-        for k in ("unit_cost", "unit_price", "change_pct", "otd_pct", "ppm", "days"):
+        for k in ("unit_cost", "unit_price", "change_pct", "otd_pct", "ppm", "days", "volume_per_year", "qty_next_12m"):
             if v.get(k) is not None:
                 expected.append(float(v[k]))
     if not expected:

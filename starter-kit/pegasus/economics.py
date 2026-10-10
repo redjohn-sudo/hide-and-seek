@@ -8,7 +8,8 @@ we find trades that are cheap for it and valuable for us.
 
 import os
 import re
-from itertools import product
+from itertools import combinations, product
+from statistics import median
 from pathlib import Path
 
 from arena_kit.cost import closing_terms, complete_offer, must_haves_ok, supplier_value, total_cost
@@ -122,6 +123,26 @@ def price_floor(case, structure, std, hi):
     if not std or not std.get("_floor"):
         return 0.01
     return cheapest_price(case, structure, with_relationship(std), 0.01, hi)
+
+
+def implied_rate(sheets):
+    """The supplier's own cost of money, from two sheets of the SAME message that differ only in
+    payment days and price (its standing offer beside "Alternatively, with Zahlungsziel 14 days
+    net: ..."): value parity p1 (1 - r d1 / 360) = p2 (1 - r d2 / 360). P02: 373.88 at 90 days
+    beside 368.68 at 14 -> 6.6 %, the rate fitted on the arena's own charges. None without a pair."""
+    rates = []
+    for x, y in combinations(sheets, 2):
+        diff = {k for k in set(x) | set(y) if x.get(k) != y.get(k)}
+        if diff != {"unit_price", "payment_days"}:
+            continue
+        p1, d1, p2, d2 = x["unit_price"], x["payment_days"], y["unit_price"], y["payment_days"]
+        den = p1 * d1 - p2 * d2
+        if not den:
+            continue
+        r = 360 * (p1 - p2) / den
+        if 0.02 <= r <= 0.20:
+            rates.append(r)
+    return median(rates) if rates else None
 
 
 def bottoms(case, ranked, std, hi):
