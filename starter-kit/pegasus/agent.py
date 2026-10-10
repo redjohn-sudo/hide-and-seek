@@ -42,7 +42,7 @@ PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price incre
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
-ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.945"))  # relationship cases: anchor >= this x floor (0.97 opened P01 at 129: 0.973)  # keep the anchor structure within this share of the best price
+ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.92"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
 ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
@@ -277,6 +277,9 @@ class PegasusAgent:
         out = self._decide(case, threads, sid, busy)
         if out and isinstance(out.get("message"), dict) and not out["message"].get("action") and out["message"].get("body"):
             who = out.get("supplier_id")
+            st = self.state.get(who)
+            if st and out["message"].get("term_sheets"):
+                self._floored(case, st, out["message"])  # the one exit point: no path sends a sheet under the floor
             n = sum(m.get("from") == "buyer" for m in threads.get(who, [])) + 1
             subj = out["message"].get("subject") or f"Re: {case['title']}"
             out["message"]["subject"] = f"{subj} ({n})"[:300]
@@ -604,10 +607,12 @@ class PegasusAgent:
             # dearer one meanwhile (and do not accept a sheet that may be stale)
             return {"wait": True}
         c_open = self._c_open(case, threads)
-        final = best and latest(threads[best[1]]).get("status") in ("final_offer", "agreed")
-        # After its last word, asking again makes it walk (P02 lot E). When our alternative is no
+        status_best = latest(threads[best[1]]).get("status") if best else None
+        final = status_best == "final_offer"
+        # After its LAST word, asking again makes it walk (P02 lot E): when our alternative is no
         # better than the opening, a deal estimated within the model's error band (0.5 %) above the
-        # opening costs at worst the same 0 as walking - and may well score: take it.
+        # opening costs at worst the same 0 as walking - take it. An "agreed" is not a last word:
+        # its agreed offer stands and rounds remain, so the normal margin applies (P02 lot F: 0.013).
         margin = -0.005 if (final and self.c_alt >= c_open) else (0.0 if final else 0.002)
         if best and best[0] >= c_open - margin * abs(c_open):
             # a deal not clearly cheaper than the best opening scores 0 (P02 lot A: estimated
