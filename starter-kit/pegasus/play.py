@@ -32,6 +32,10 @@ def play_case(table, case_id, agent, deadline=None):
     for events in threads.values():
         for m in events:
             fetch_documents(table, m)
+    if hasattr(agent, "observe"):
+        for s_id, events in threads.items():
+            for m in events:
+                agent.observe(s_id, m)
     lock, done = threading.Lock(), threading.Event()
     box, slowest, inflight = {}, [0.0], set()
 
@@ -100,6 +104,8 @@ def play_case(table, case_id, agent, deadline=None):
                 box["result"] = reply["result"]
                 done.set()
                 return
+            if hasattr(agent, "observe"):
+                agent.observe(dsid, reply)  # the reader's LLM call runs outside the decision lock
             with lock:
                 threads[dsid] += [{**msg, "from": "buyer"}, fetch_documents(table, reply)]
                 slowest[0] = max(slowest[0], time.monotonic() - t0)

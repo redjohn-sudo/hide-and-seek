@@ -21,6 +21,7 @@ from arena_kit.docs import quote_terms, standard_terms
 from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 
 from . import economics as eco
+from . import adapt as rules
 from . import guard, prose, reader
 from .claims import Claims
 from .claims_intel import Claims as IntelClaims
@@ -116,6 +117,7 @@ class PegasusAgent:
     def __init__(self, package=None, playbook=None, push_after_final=False):
         self.pkg, self.playbook, self.push_after_final = package, playbook or {}, push_after_final
         self.refused, self.mirrored = set(), set()  # sheet IDs the arena refused / we sent back
+        self._observed = {}  # (supplier, text) -> signals read before the decision lock
         self.case_id, self.claims, self.state = None, None, {}
 
     def _c_open(self, case, threads):
@@ -152,6 +154,15 @@ class PegasusAgent:
             # no alternative: a deal at the opening still scores what no deal scores, and wins ties
             return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}
         return {"supplier_id": live[0], "message": {"action": {"type": "walk_away"}}} if live else None
+
+    def observe(self, sid, message):
+        """Read a supplier reply (an LLM call) outside the decision lock; `decide` finds it here."""
+        text = (message or {}).get("body") or ""
+        if text and (message or {}).get("from") != "buyer":
+            try:
+                self._observed[(sid, text[:200])] = reader.read(text)
+            except Exception as e:  # reading is a bonus, never a reason to lose the round
+                log.warning("observe failed: %s", e)
 
     def refuse(self, sheet_id):
         """The arena refused to close on this sheet: never try it again."""
@@ -268,8 +279,15 @@ class PegasusAgent:
         key = (len(events), text[:80])
         if text and st.get("read_key") != key:
             st["read_key"] = key
-            st["last_signals"] = reader.read(text)
+            cached = self._observed.pop((sid, text[:200]), None)
+            st["last_signals"] = cached if cached is not None else reader.read(text)
             reader.apply(st, st["last_signals"])
+            if "cost_floor" in st["last_signals"]:
+                st["floor_hits"] = st.get("floor_hits", 0) + 1
+            if st["last_signals"]:
+                log.info("%s %s heard: %s", case["case_id"], sid, sorted(st["last_signals"]))
+        if rules.must_close(st) and status != "agreed" and sheet_id:
+            return self._done(case, threads, sid, st, busy)
 
         target_c = (self.playbook.get(case["case_id"]) or {}).get("target_c")
         good_enough = target_c is not None and c_s <= target_c + 1e-6 + 0.004 * max(
@@ -551,6 +569,10 @@ class PegasusAgent:
     def _sheets(self, case, st, target):
         current = {k: v for k, v in eco.closing_terms(case, st.get("last_terms") or st["open"], st["std"]).items()
                    if k in eco.fields(case)}
+        if rules.active(st):  # the supplier stated a constraint: honour it in every sheet
+            picked = rules.pick_sheets(case, st, target, current, st.get("ask"))
+            if picked:
+                return picked
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
         picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"),
@@ -649,8 +671,9 @@ class PegasusAgent:
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:
             lines[-1] = ("thank you for your offer and for the step you made towards us on "
                          f"{case['title'].lower()} - we appreciate it.")
-        chosen = chosen[:MAX_CLAIMS]
+        chosen = chosen[:rules.claims_cap(st, MAX_CLAIMS)]
         lines += [c["sentence"] for c in chosen]
+        lines += rules.lines(case, st, sheets)
         if not sheets:
             lines.append("Could you confirm a feasible package using the allowed terms?")
         if final_trade:
