@@ -114,6 +114,19 @@ VALUED = {"cost_floor": "unit_price", "lead_time_firm": "lead_time_days",
           "chargeback_too_high": "chargeback_eur_per_complaint"}
 UNITS = {"lead_time_days": r"days?|tage|working days", "chargeback_eur_per_complaint": r"eur|€",
          "unit_price": r"eur|€"}
+CONTEXT = {"lead_time_days": r"lead ?time|lieferzeit|deliver", "chargeback_eur_per_complaint": r"chargeback|complaint|penalt",
+           "unit_price": r"price|per unit|per piece|per pc|preis"}
+
+
+def nearest_field(line, pos):
+    """Which field's word sits closest to a number on the line (None if no field word at all)."""
+    best = None
+    for field, rx in CONTEXT.items():
+        for m in re.finditer(rx, line, re.I):
+            d = min(abs(m.start() - pos), abs(m.end() - pos))
+            if best is None or d < best[0]:
+                best = (d, field)
+    return best[1] if best else None
 VERSION = reader_cache.fingerprint([SYSTEM, json.dumps(SCHEMA, sort_keys=True)])
 
 
@@ -145,8 +158,12 @@ def validate(sig, line, quote):
         unit = UNITS[VALUED[kind]]
         num = re.escape(f"{v:g}") + r"(?!\d|[.,]\d)"  # 54 is not 54.5
         near = re.compile(r"(?<![\d.,])" + num + r"\s*(?:%s)" % unit + "|" + r"(?:%s)\s*" % unit + num, re.I)
-        if not near.search(line.replace("\u202f", " ")):
+        m = near.search(line.replace("\u202f", " "))
+        if not m:
             return False, None  # the number is on the line but not with its unit (54 EUR is not 54 days)
+        nearest = nearest_field(line, m.start())
+        if nearest is not None and nearest != VALUED[kind]:
+            return False, None  # two EUR amounts on one line: the one next to "chargeback" is the chargeback
         return True, v
     return True, None
 
@@ -258,10 +275,11 @@ def apply(st, signals):
     st.setdefault("stated", {}).update(getattr(signals, "values", {}) or {})
     st["cash"] = st.get("cash") or "wants_faster_payment" in seen
     st["freeze"] = st.get("freeze") or "price_frozen" in seen
-    st["wants_index"] = "requires_index_clause" in seen
-    st["wants_volume"] = "wants_volume_commitment" in seen
-    st["wants_duration"] = "wants_longer_contract" in seen
-    st["cb_too_high"] = "chargeback_too_high" in seen
-    st["lead_firm"] = "lead_time_firm" in seen
-    st["args_rejected"] = "arguments_rejected" in seen
+    # flags only accumulate: a prior from memory is never erased by a reply that does not repeat it
+    st["wants_index"] = st.get("wants_index") or "requires_index_clause" in seen
+    st["wants_volume"] = st.get("wants_volume") or "wants_volume_commitment" in seen
+    st["wants_duration"] = st.get("wants_duration") or "wants_longer_contract" in seen
+    st["cb_too_high"] = st.get("cb_too_high") or "chargeback_too_high" in seen
+    st["lead_firm"] = st.get("lead_firm") or "lead_time_firm" in seen
+    st["args_rejected"] = st.get("args_rejected") or "arguments_rejected" in seen
     return seen

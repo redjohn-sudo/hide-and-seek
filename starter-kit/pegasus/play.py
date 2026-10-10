@@ -59,6 +59,7 @@ def play_case(table, case_id, agent, deadline=None):
                     return
                 cap = deadline() if callable(deadline) else deadline
                 if cap and time.time() > cap - max(CLOSE_BEFORE_CAP_S, slowest[0] + ROUND_MARGIN_S):
+                    log.info("%s: the wave's cap is near - closing", case_id)
                     decision = agent.closing(case, threads) if hasattr(agent, "closing") else closing_move(case, threads)
                 else:
                     decision = agent.decide(case, threads, sid, busy=inflight - {sid})
