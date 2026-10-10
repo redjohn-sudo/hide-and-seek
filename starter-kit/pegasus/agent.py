@@ -33,6 +33,7 @@ RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
 ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of the supplier's price
 PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
+FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
     "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
@@ -110,7 +111,7 @@ class PegasusAgent:
             st = self.state.get(s) or {"std": supplier_reference(case, events)}
             for ts in (first.get("term_sheets") or [])[:1]:
                 if ts.get("terms", {}).get("unit_price") and eco.ok(case, ts["terms"], st["std"]):
-                    out = min(out, eco.standing_cost(case, ts["terms"], st["std"]))
+                    out = min(out, eco.standing_cost(case, ts["terms"], eco.with_relationship(st["std"])))
         return out
 
     def closing(self, case, threads):
@@ -126,7 +127,7 @@ class PegasusAgent:
             for sid_sheet, terms in sheets:
                 if sid_sheet in self.refused or not eco.ok(case, terms, st["std"]):
                     continue
-                c = eco.standing_cost(case, terms, st["std"])
+                c = eco.standing_cost(case, terms, eco.with_relationship(st["std"]))
                 if best is None or c < best[0]:
                     best = (c, s, sid_sheet)
         live = live_threads(threads)
@@ -173,7 +174,7 @@ class PegasusAgent:
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
                                      self.pkg.facts if self.pkg else {})
             if sup:
-                st["std"]["_supplier"] = sup  # every C below includes the relationship charge
+                st["std"]["_floor"] = sup  # floors our prices; counted in C only to decide acceptance
                 log.info("%s %s: supplier full cost estimate %.2f", case["case_id"], sid, sup["full_cost"])
             st["anchor"] = self._anchor(case, sid, st)
         return st
@@ -257,7 +258,8 @@ class PegasusAgent:
             else:
                 return self._done(case, threads, sid, st, busy)
         if status == "final_offer" and not (self.push_after_final and not st.get("pushed")):
-            trade = self._fresh_final_trade(case, threads, sid, st, c_s, busy)
+            # pushing after a final offer made P02 walk away (lot B): off unless PEGASUS_FINAL_TRADE=1
+            trade = self._fresh_final_trade(case, threads, sid, st, c_s, busy) if FINAL_TRADE else None
             if trade:
                 target, sheet = trade
                 st["final_trade_sent"] = True
@@ -300,8 +302,20 @@ class PegasusAgent:
         st["last_target"] = target
         return self._send(case, threads, sid, st, target, k)
 
+    def _floored(self, case, st, msg):
+        """Never offer under the price where the relationship charge outgrows the saving."""
+        if not st["std"].get("_floor"):
+            return msg
+        for ts in msg.get("term_sheets") or []:
+            t = ts["terms"]
+            s = {f: v for f, v in t.items() if f in eco.fields(case)}
+            floor = eco.price_floor(case, s, st["std"], max(10 * t["unit_price"], 1.0))
+            if t["unit_price"] < floor:
+                t["unit_price"] = round(min(floor, st.get("ask") or floor), 2)
+        return msg
+
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
-        msg = self._message(case, threads, sid, st, target, k, sheets, final_trade)
+        msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
         alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
         session_offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
                           for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
@@ -436,7 +450,7 @@ class PegasusAgent:
             for i, (sid_sheet, terms) in enumerate(offered(threads[s])):
                 if sid_sheet in self.refused or not eco.ok(case, terms, st["std"]):
                     continue
-                c = eco.standing_cost(case, terms, st["std"])
+                c = eco.standing_cost(case, terms, eco.with_relationship(st["std"]))
                 if i > 0:
                     # an alternative ("offer:...-a") cannot be accepted - only the standing sheet can
                     if alt_best is None or c < alt_best[0]:

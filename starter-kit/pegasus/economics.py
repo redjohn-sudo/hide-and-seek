@@ -69,9 +69,24 @@ def cost(case, terms, std=None):
     344.20 EUR cost 143 193 EUR of relationship charge, the deal scored 0)."""
     std = std or {}
     sup = std.get("_supplier")
-    clean_std = {k: v for k, v in std.items() if k != "_supplier"}
-    clean = {k: v for k, v in terms.items() if k != "_supplier"}
+    clean_std = {k: v for k, v in std.items() if not k.startswith("_")}
+    clean = {k: v for k, v in terms.items() if not k.startswith("_")}
     return total_cost(case, clean, clean_std, sup)
+
+
+def with_relationship(std):
+    """`std` with the supplier estimate switched on for C (acceptance decisions), if we have one.
+    Offers are built without it - it only floors their prices (see `price_floor`)."""
+    if std and std.get("_floor"):
+        return {**std, "_supplier": std["_floor"]}
+    return std
+
+
+def price_floor(case, structure, std, hi):
+    """The price under which the relationship charge outgrows the saving (bottom of the U)."""
+    if not std or not std.get("_floor"):
+        return 0.01
+    return cheapest_price(case, structure, with_relationship(std), 0.01, hi)
 
 
 def ok(case, terms, std=None):
@@ -288,7 +303,7 @@ def best_at_price(case, price, std):
     for s in grid(case):
         p = price
         if (std or {}).get("_supplier"):
-            p = max(price, cheapest_price(case, s, std, 0.01, max(10 * price, 1.0)))
+            p = max(p, cheapest_price(case, s, std, 0.01, max(10 * price, 1.0)))
         t = sheet(case, s, p)
         if ok(case, t, std):
             c = cost(case, t, std)
