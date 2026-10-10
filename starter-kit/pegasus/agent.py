@@ -384,6 +384,8 @@ class PegasusAgent:
 
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
+        for ts in msg.get("term_sheets") or []:  # what we have offered so far (for `remaining_trade`)
+            st.setdefault("proposed", []).append({f: v for f, v in ts["terms"].items() if f != "unit_price"})
         if prose.ENABLED and msg.get("body"):
             lines = msg["body"].split("\n")
             args = [l for l in lines if re.search(r"\b(?:idx|quote|offer|sc|qn|po|cost|fc|news|doc|ctr):", l)]
@@ -680,7 +682,7 @@ class PegasusAgent:
                 cands = ([x for r in rivals for x in self.fallback_claims.rival_claim(*r)]
                          + self.fallback_claims.candidates(sid, part, price, st["drivers"]))
                 picked = team_claims.pegasus_claims(case, self.pkg, cands, used=self.fallback_claims.used,
-                                                    supplier=sid)[:3]
+                                                    supplier=sid)[:rules.claims_cap(st, MAX_CLAIMS)]
                 team_claims.remember(picked, sid, self.fallback_claims.used)
                 chosen = [{"refs": list(c.ids), "sentence": c.sentence} for c in picked]
             except Exception as e:
@@ -700,7 +702,11 @@ class PegasusAgent:
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:
             lines[-1] = ("thank you for your offer and for the step you made towards us on "
                          f"{case['title'].lower()} - we appreciate it.")
-        chosen = chosen[:rules.claims_cap(st, MAX_CLAIMS)]
+        cap = rules.claims_cap(st, MAX_CLAIMS)
+        for c in chosen[cap:]:  # not sent: give their IDs back to the ledger
+            self.fallback_claims.used -= set(c["refs"])
+            self.fallback_claims.used.discard((sid, tuple(c["refs"])))
+        chosen = chosen[:cap]
         lines += [c["sentence"] for c in chosen]
         lines += rules.lines(case, st, sheets)
         if not sheets:

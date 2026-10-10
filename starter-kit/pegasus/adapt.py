@@ -111,16 +111,18 @@ def lines(case, st, sheets):
 
 
 def remaining_trade(case, st):
-    """A lever the supplier itself asked for, that the case lets us negotiate, is still on the table."""
-    neg = set(case.get("negotiable", []))
-    return ((st.get("cash") and "payment_days" in neg) or (st.get("wants_index") and "index_clause" in neg)
-            or (st.get("wants_volume") and "volume_per_year" in neg) or (st.get("wants_duration") and "contract_months" in neg)
-            or (st.get("cb_too_high") and "chargeback_eur_per_complaint" in neg) or (st.get("lead_firm") and "lead_time_days" in neg))
+    """Some allowed value of a negotiable non-price field has never been offered: a trade remains."""
+    proposed = st.get("proposed") or []
+    for f in case.get("negotiable", []):
+        if f == "unit_price":
+            continue
+        opts = case.get("term_options", {}).get(f) or []
+        offered = [p.get(f) for p in proposed]
+        if any(o not in offered for o in opts):
+            return True
+    return False
 
 
 def must_close(st, case=None):
-    """It said its price is its limit: close - unless a trade it asked for is still untried."""
-    hits = st.get("floor_hits", 0)
-    if hits >= 3:
-        return True
-    return hits >= 2 and not (case and remaining_trade(case, st) and not st.get("trade_offered"))
+    """It said twice that its price is its limit and every trade has been tried: stop pushing."""
+    return st.get("floor_hits", 0) >= 2 and not (case and remaining_trade(case, st))

@@ -141,14 +141,42 @@ def _lines(text):
 
 
 def keyword_signals(text):
-    """Keyword fallback, line by line: a denied line confirms no affirmative signal."""
+    # Match within sentences: a negation elsewhere in the mail must not erase a request.
+    phrases = re.split(r"(?<=[.!?])\s+|\n+", (text or "").lower())
     out = set()
-    for line in (text or "").splitlines():
-        low = line.lower()
-        denied = bool(NEGATION.search(low))
-        for t, rx in KEYWORDS.items():
-            if re.search(rx, low) and not (denied and t in AFFIRMATIVE):
-                out.add(t)
+    for phrase in phrases:
+        for kind, rx in KEYWORDS.items():
+            if not re.search(rx, phrase):
+                continue
+            if kind == "cost_floor" and (re.search(r"(?:close to|approaching|reaching).{0,25}(?:limit|bottom)", phrase)
+                    or ("price" not in phrase and "days" in phrase and "absolute limit" in phrase)):
+                continue  # close to a price limit, or a payment limit, is not an attained floor
+            if kind == "wants_faster_payment" and re.search(r"(?:faster|shorter) payment.{0,15}(?:does not|would not|won't) help|(?:do not|don't) (?:need|want) faster payment", phrase):
+                continue
+            if kind == "wants_volume_commitment" and (re.search(r"(?:data (?:supporting|backing)|forecast data|actual (?:volume )?data).{0,50}volume|volume data", phrase)
+                    and not re.search(r"binding|commit|release schedule|what volume|which volume", phrase)):
+                continue
+            if kind == "lead_time_firm" and re.search(r"(?:will provide|will address|will .*confirm).{0,70}(?:earliest|lead time)", phrase):
+                continue  # no actual lead has been supplied yet
+            if kind == "requires_index_clause" and re.search(r"(?:not required|not mandatory|need not|do not require|no index.*required)", phrase):
+                continue
+            if kind == "price_frozen" and re.search(r"(?:not|no longer) frozen|no (?:price )?freeze", phrase):
+                continue
+            if kind == "cost_floor" and re.search(r"no absolute (?:limit|bottom)|not (?:our |the )?(?:bottom line|absolute limit)", phrase):
+                continue
+            if kind == "wants_longer_contract" and re.search(r"(?:do not|don't) (?:need|want) a longer contract|longer contract.{0,20}(?:would not|does not) help", phrase):
+                continue
+            if kind == "chargeback_too_high" and re.search(r"not too (?:high|much)", phrase):
+                continue
+            if kind == "lead_time_firm" and re.search(r"(?:no|without) overtime", phrase) and not re.search(r"earliest|must maintain|shortest|is firm", phrase):
+                continue
+            if kind == "needs_internal_approval" and re.search(r"(?:already approved|approved a|reviewed internally|clarified this internally)", phrase):
+                continue
+            if kind == "free_capacity" and re.search(r"(?:no|not|without) free capacity", phrase):
+                continue
+            if kind == "capacity_tight" and re.search(r"(?:not|no longer) (?:fully booked|tight capacity)", phrase):
+                continue
+            out.add(kind)
     return out
 
 
