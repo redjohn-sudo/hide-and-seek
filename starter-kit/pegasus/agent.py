@@ -40,6 +40,7 @@ RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
 ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of the supplier's price
 PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
+RFQ_CAP = float(os.environ.get("PEGASUS_RFQ_CAP", "0.995"))   # a bidder never gets a target above this x the best rival
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
 ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
@@ -128,6 +129,19 @@ class PegasusAgent:
         self.refused, self.mirrored = set(), set()  # sheet IDs the arena refused / we sent back
         self._observed = {}  # (supplier, text) -> signals read before the decision lock
         self.case_id, self.claims, self.state = None, None, {}
+
+    def _rival_cost(self, case, threads, sid):
+        """Our cost of the cheapest standing sheet of another live bidder (relationship-aware)."""
+        best = None
+        for other in live_threads(threads):
+            if other == sid:
+                continue
+            ost = self.state.get(other) or {"std": supplier_reference(case, threads[other])}
+            for _, t in offered(threads[other])[:1]:
+                if eco.ok(case, t, ost["std"]):
+                    c = eco.standing_cost(case, t, eco.with_relationship(ost["std"]))
+                    best = c if best is None else min(best, c)
+        return best
 
     def _c_open(self, case, threads):
         """C of the cheapest opening quote that keeps the must-haves (the score's zero point)."""
@@ -378,6 +392,11 @@ class PegasusAgent:
         target = anchor + SCHEDULE[k] * max(c_s - anchor, 0)
         if st.get("last_target") is not None:
             target = max(target, st["last_target"])  # concessions only go one way (P02/P01 lot E retreated)
+        rival_c = self._rival_cost(case, threads, sid)
+        if rival_c is not None and rival_c * RFQ_CAP < target:
+            # RFQ: never ask this bidder for a package dearer than the best live rival offer, which
+            # we cite to it (public calibration: P05 0.51-0.69 -> 0.81-0.87 with this cap)
+            target = rival_c * RFQ_CAP
         dc = direct_cost(events) if USE_FLOOR else None
         if dc and not st.get("floor_price"):
             st["floor_price"], st["floor_at"] = dc * (1 + FLOOR_MARGIN), st["offers"]
@@ -793,7 +812,7 @@ class PegasusAgent:
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:
             lines[-1] = ("thank you for your offer and for the step you made towards us on "
                          f"{case['title'].lower()} - we appreciate it.")
-        cap = rules.claims_cap(st, MAX_CLAIMS)
+        cap = rules.claims_cap(st, MAX_CLAIMS if k == 0 else 1)  # only round-1 claims set the level; one new fact per round after
         for c in chosen[cap:]:  # not sent: give their IDs back to the ledger
             self.fallback_claims.used -= set(c["refs"])
             self.fallback_claims.used.discard((sid, tuple(c["refs"])))
