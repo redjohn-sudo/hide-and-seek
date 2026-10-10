@@ -42,7 +42,7 @@ PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price incre
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
-ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.92"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
+ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
 ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
@@ -267,8 +267,9 @@ class PegasusAgent:
         best = eco.best_at_price(case, expected, st["std"], cur)
         if best:
             st["anchor_structure"] = best[1]
-            if st["std"].get("_floor"):  # strategic supplier: never open far under its cost (P02 lot A scored 0)
-                p = max(p, ANCHOR_FLOOR * eco.price_floor(case, best[1], st["std"], max(10 * open_p, 1.0)))
+            if st["std"].get("_floor"):  # strategic supplier: open at most as far under its floor as its ask is above it
+                fl = eco.price_floor(case, best[1], st["std"], max(10 * open_p, 1.0))
+                p = max(p, fl)  # every sheet we send must be one we can accept: it may agree to it at once
             return eco.cost(case, eco.sheet(case, best[1], p), st["std"])
         return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
@@ -299,6 +300,8 @@ class PegasusAgent:
         sheet_id, terms = standing(events)
         offers = [eco.standing_cost(case, t, st["std"]) for _, t in offered(events) if eco.ok(case, t, st["std"])]
         c_s = min(offers) if offers else float("inf")
+        rel = [eco.standing_cost(case, t, eco.with_relationship(st["std"])) for _, t in offered(events) if eco.ok(case, t, st["std"])]
+        st["c_s_rel"] = min(rel) if rel else None
         if (terms or {}).get("unit_price"):
             st["ask"] = terms["unit_price"]
             st["last_terms"] = terms
@@ -404,14 +407,23 @@ class PegasusAgent:
 
     def _floored(self, case, st, msg):
         """Never offer under the price where the relationship charge outgrows the saving."""
-        if not st["std"].get("_floor") or st.get("offers", 0) < 3:
+        if not st["std"].get("_floor"):
             return msg
+        c_s = st.get("c_s_rel")
+        kept = []
         for ts in msg.get("term_sheets") or []:
             t = ts["terms"]
             s = {f: v for f, v in t.items() if f in eco.fields(case)}
             floor = eco.price_floor(case, s, st["std"], max(10 * t["unit_price"], 1.0))
             if t["unit_price"] < floor:
-                t["unit_price"] = round(min(floor, st.get("ask") or floor), 2)
+                # the cap is per package: the price at which this package costs us what its
+                # standing offer costs us (345 at 14 days + index is not 345 at 90 days fixed)
+                cap = eco.price_for(case, s, c_s, eco.with_relationship(st["std"])) if c_s else floor
+                if cap < floor - 0.005:
+                    continue  # this package cannot beat its offer for us: do not send it
+                t["unit_price"] = round(min(floor, cap), 2)
+            kept.append(ts)
+        msg["term_sheets"] = kept
         return msg
 
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False, busy=()):
@@ -619,9 +631,16 @@ class PegasusAgent:
             # 582 EUR below the opening, 2 902 EUR above it in the arena) - keep negotiating
             log.info("%s: best %.0f not clearly below the opening %.0f", case["case_id"], best[0], c_open)
             if moves_left(case, threads[best[1]]) > 1 and best[1] not in busy:
-                return {"supplier_id": best[1], "message": {"subject": f"Re: {case['title']}",
-                        "body": "Thank you. Your offer does not yet improve on your opening quote for us. "
-                                "Could you review your price?\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"}}
+                # a real counter (floored sheets), never an empty question (P02 lot G: two empty
+                # messages, then its final offer at the opening price)
+                s_id = best[1]; st2 = self.state.get(s_id) or self._thread(case, s_id, threads[s_id])
+                st2["offers"] = max(st2.get("offers", 0), 3)  # the floor applies to this counter
+                st2["offers"] += 1
+                k2 = min(st2["offers"], len(SCHEDULE) - 1)
+                tgt = st2.get("last_target") or best[0]
+                out = self._send(case, threads, s_id, st2, tgt, k2, busy=busy)
+                if out and out.get("message", {}).get("term_sheets"):
+                    return out
         if best and best[0] < self.c_alt:
             log.info("%s: accept %s at C=%.0f", case["case_id"], best[2], best[0])
             return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}
@@ -754,7 +773,9 @@ class PegasusAgent:
                 picked = team_claims.pegasus_claims(case, self.pkg, cands, used=self.fallback_claims.used,
                                                     supplier=sid)[:rules.claims_cap(st, MAX_CLAIMS)]
                 team_claims.remember(picked, sid, self.fallback_claims.used)
-                chosen = [{"refs": list(c.ids), "sentence": c.sentence} for c in picked]
+                # order-history claims (po:) were accepted 4 times out of 44 in a public 100-session calibration
+                chosen = [{"refs": list(c.ids), "sentence": c.sentence} for c in picked
+                          if not all(str(r).startswith("po:") for r in c.ids)]
             except Exception as e:
                 log.warning("%s team claims failed (%s) - ours instead", sid, e)
                 chosen = None
