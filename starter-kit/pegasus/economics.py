@@ -116,6 +116,24 @@ def standing_cost(case, terms, std):
     return cost(case, closing_terms(case, terms, std), std)
 
 
+def distance(case, structure, current):
+    """How far a structure is from the supplier's current terms, each field scaled by the range
+    of its options (0 = what it asks for)."""
+    if not current:
+        return 0.0
+    d = 0.0
+    for f, v in structure.items():
+        cur = current.get(f)
+        if cur is None or v == cur:
+            continue
+        opts = [o for o in case.get("term_options", {}).get(f, []) if isinstance(o, (int, float))]
+        if isinstance(v, (int, float)) and isinstance(cur, (int, float)) and len(opts) > 1:
+            d += abs(v - cur) / (max(opts) - min(opts))
+        else:
+            d += 1.0
+    return d
+
+
 def best_for_target(case, target_c, std, current=None, ask=None, limit=3):
     """Structures that leave the supplier the highest price at our target C - the cheapest way
     for us to give it what it values most (price), whatever the supplier's own price is.
@@ -127,9 +145,10 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3):
             p = min(p, ask)
         t = sheet(case, s, p)
         if p > 0.01 and ok(case, t, std):
-            moved = sum(1 for f, v in s.items() if current and f in current and v != current[f])
-            rows.append((p, -moved, s))
-    rows.sort(key=lambda r: (-round(r[0], 2), -r[1]))
+            rows.append((p, distance(case, s, current), s))
+    # at the same price for us, the structure closest to what the supplier asks for is a free gift
+    # to it (P11: ppm 1500 with a 500 EUR chargeback costs us what ppm 300 does; it opened at 6400)
+    rows.sort(key=lambda r: (-round(r[0], 2), r[1]))
     if not rows:
         return []
     main = rows[0][2]
