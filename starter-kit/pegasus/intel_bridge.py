@@ -3,11 +3,17 @@ import copy
 import json
 import math
 import re
+import threading
 from functools import lru_cache
 from pathlib import Path
 
 from intel import Package, agent_brief
 from intel.dossier import month_shift
+
+# lru_cache does not stop the first callers from building at once: the 10 agents of a wave each built
+# their own copy, 16.5 s for the slowest (0.09 s alone). One builds, the others wait and get the cache.
+_LOAD_LOCK = threading.Lock()
+
 
 @lru_cache(maxsize=4)
 def _load_package(root, release, fingerprint):
@@ -32,7 +38,8 @@ class Intelligence:
                 paths.extend(p for p in base.rglob('*') if p.is_file()
                              and p.suffix in {'.json', '.sqlite', '.csv', '.md'})
             fingerprint = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(paths))
-            self._pkg = _load_package(str(self.root), str(release) if release else None, fingerprint)
+            with _LOAD_LOCK:
+                self._pkg = _load_package(str(self.root), str(release) if release else None, fingerprint)
         return self._pkg
 
     def brief(self,case,sid):
