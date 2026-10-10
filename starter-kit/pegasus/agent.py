@@ -34,6 +34,16 @@ ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of th
 PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
+# Research-backed message tactics (sandbox bench decides which stay on)
+ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
+CONDITIONAL = os.environ.get("PEGASUS_COND", "0") == "1"       # "if you can do X, we commit to Y"
+WARM = os.environ.get("PEGASUS_WARM", "0") == "1"              # specific thanks + open question (MIT)
+MAX_CLAIMS = int(os.environ.get("PEGASUS_MAX_CLAIMS", "3"))    # fewer, stronger arguments (Maaravi)
+CASH_PREMIUM = float(os.environ.get("PEGASUS_CASH_PREMIUM", "0"))  # faster payment costs it extra
+GAP_LINE = os.environ.get("PEGASUS_GAP", "0") == "1"           # RFQ: tell each bidder its gap in %
+NONCE = os.environ.get("PEGASUS_NONCE", "")  # bench only: a run tag in the subject defeats the reply cache
+TFT = float(os.environ.get("PEGASUS_TFT", "0"))          # >0: reciprocal steps (x supplier's last move)
+MIN_TFT = float(os.environ.get("PEGASUS_MIN_TFT", "0.05"))  # plus this share of the gap, so we always move
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
     "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
@@ -290,7 +300,11 @@ class PegasusAgent:
             if best:
                 target = min(target, best[0])
         prev = st.get("last_target")
-        if prev is not None and k > 0 and not st.get("floor_price"):
+        if TFT > 0 and prev is not None and k > 0 and len(st["seen"]) >= 2:
+            # reciprocity (MiCRO, de Jonge 2022): move by what the supplier just moved, no more
+            their_move = max(st["seen"][-2] - st["seen"][-1], 0.0)
+            target = min(prev + TFT * their_move + MIN_TFT * max(c_s - prev, 0), c_s)
+        elif prev is not None and k > 0 and not st.get("floor_price"):
             # suppliers answer "you only moved by one cent": every new offer moves visibly
             step = max(MIN_STEP * (c_s - prev), 0)
             target = max(target, min(prev + step, c_s))
@@ -512,8 +526,12 @@ class PegasusAgent:
                 quick = {**picks[0][1], "payment_days": min(case["term_options"]["payment_days"])}
                 if quick not in [s for _, s in picks]:
                     picks = picks[:2] + [(None, quick)]
+            main_p = picks[0][0]
             for p, s in picks[:3]:
                 price = p if p is not None else min(eco.price_for(case, s, target, st["std"]), st.get("ask") or 1e18)
+                if (CASH_PREMIUM and main_p and "payment_days" in s and s is not picks[0][1]
+                        and s["payment_days"] < picks[0][1].get("payment_days", 0) and price < main_p):
+                    price = price - CASH_PREMIUM * (main_p - price)  # paying faster must buy more than its interest
                 t = eco.sheet(case, s, price)
                 if eco.ok(case, t, st["std"]) and t not in out:
                     out.append(t)
@@ -569,6 +587,11 @@ class PegasusAgent:
         if len(chosen) < 3:
             chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
+        prev_their = st["seen"][-2] if len(st["seen"]) >= 2 else None
+        if WARM and prev_their is not None and st["seen"][-1] < prev_their:
+            lines[-1] = ("thank you for your offer and for the step you made towards us on "
+                         f"{case['title'].lower()} - we appreciate it.")
+        chosen = chosen[:MAX_CLAIMS]
         lines += [c["sentence"] for c in chosen]
         if not sheets:
             lines.append("Could you confirm a feasible package using the allowed terms?")
@@ -604,6 +627,24 @@ class PegasusAgent:
             if unit == "pc": unit = "pcs"
         if len(case["parts"]) > 1:
             unit = "complete bundles of " + ", ".join(case["parts"])
+        if sheets and (ESCALATE or CONDITIONAL):
+            main_t = sheets[0]
+            gives = []
+            if main_t.get("contract_months"):
+                gives.append(f"a {main_t['contract_months']}-month agreement")
+            gives.append(f"{vol:,} {unit} per year")
+            if CONDITIONAL:
+                lines.append(f"If you can do EUR {main_t['unit_price']:.2f} per unit, we commit to "
+                             f"{' and '.join(gives)} right away.")
+            if ESCALATE and k <= 1:
+                lines.append(f"Could you check with your management whether EUR {main_t['unit_price']:.2f} "
+                             f"is possible if we commit to {' and '.join(gives)}?")
+        if GAP_LINE and rivals and price:
+            gap = (price / rivals[0][1] - 1) * 100
+            if gap > 0.1:
+                lines.append(f"On a comparable basis your offer is {gap:.1f}% above the best offer we hold.")
+        if WARM:
+            lines.append("What would help you move closer to these terms?")
         commit = f"We commit to a binding volume of {vol:,} {unit} per year"
         lines.append(commit + (f" over {months} months." if months else "."))
         asked = (latest(threads[sid]).get("body") or "").lower()
@@ -614,7 +655,7 @@ class PegasusAgent:
         lines += ["We value our cooperation.", "",
                   "Best regards", "Hollerau Pumpenwerke GmbH, Purchasing"]
         refs = [r for c in chosen for r in c["refs"]]
-        msg = {"subject": f"Re: {case['title']}", "body": "\n".join(lines),
+        msg = {"subject": f"Re: {case['title']}" + (f" [{NONCE}]" if NONCE else ""), "body": "\n".join(lines),
                "term_sheets": [{"terms": t} for t in sheets]}
         if refs:
             msg["refs"] = refs[:20]
