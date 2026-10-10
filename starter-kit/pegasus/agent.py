@@ -55,6 +55,7 @@ MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one pa
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
 STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
 STEP_HI = float(os.environ.get("PEGASUS_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
@@ -457,6 +458,14 @@ class PegasusAgent:
         if status == "final_offer":
             st["pushed"] = True
 
+        if (HOLD_NUDGE and status == "open" and st["offers"] >= 2 and len(st["seen"]) >= 2
+                and st["seen"][-1] >= st["seen"][-2] - 1e-6 and not st["std"].get("_floor")
+                and len(live_threads(threads)) == 1):
+            # it held its price on our last step: its next word is a final offer at that price (P04:
+            # 4.94 twice, then final 4.94). Ask once for one tick under it first (4.93 = 1.000).
+            nudge = self._nudge(case, threads, sid, st, busy)
+            if nudge:
+                return nudge
         k = min(st["offers"], len(SCHEDULE) - 1)
         anchor = st["anchor"] if st["anchor"] is not None else c_s
         if c_s <= anchor + 1e-6 and sheet_id:
@@ -944,7 +953,8 @@ class PegasusAgent:
         structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
         p = terms["unit_price"]
         price = round(p - max(0.01, 0.002 * p), 2)
-        shown = [t.get("unit_price") for _, t in offered_ever(events) if t.get("unit_price")]
+        shown = [t.get("unit_price") for _, t in offered_ever(events) if t.get("unit_price")
+                 and {f: v for f, v in eco.closing_terms(case, t, st["std"]).items() if f in eco.fields(case)} == structure]
         if shown and min(shown) < price:
             price = round(min(shown), 2)  # the bottom of the ladder it showed on another variant (P11: 45.00/1500 ppm)
         if st["std"].get("_floor") and price < eco.price_floor(case, structure, st["std"], max(10 * p, 1.0)):
