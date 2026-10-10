@@ -102,6 +102,17 @@ class PegasusAgent:
         self.refused, self.mirrored = set(), set()  # sheet IDs the arena refused / we sent back
         self.case_id, self.claims, self.state = None, None, {}
 
+    def _c_open(self, case, threads):
+        """C of the cheapest opening quote that keeps the must-haves (the score's zero point)."""
+        out = float("inf")
+        for s, events in threads.items():
+            first = next((m for m in events if m.get("from") != "buyer"), {})
+            st = self.state.get(s) or {"std": supplier_reference(case, events)}
+            for ts in (first.get("term_sheets") or [])[:1]:
+                if ts.get("terms", {}).get("unit_price") and eco.ok(case, ts["terms"], st["std"]):
+                    out = min(out, eco.standing_cost(case, ts["terms"], st["std"]))
+        return out
+
     def refuse(self, sheet_id):
         """The arena refused to close on this sheet: never try it again."""
         self.refused.add(sheet_id)
@@ -135,6 +146,11 @@ class PegasusAgent:
                 st["cash"] = "cash_sensitive" in kinds
                 st["freeze"] = "price_frozen" in kinds
                 st["signals"] = kinds
+            sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
+                                     self.pkg.facts if self.pkg else {})
+            if sup:
+                st["std"]["_supplier"] = sup  # every C below includes the relationship charge
+                log.info("%s %s: supplier full cost estimate %.2f", case["case_id"], sid, sup["full_cost"])
             st["anchor"] = self._anchor(case, sid, st)
         return st
 
@@ -423,6 +439,15 @@ class PegasusAgent:
             # the best sheet is on a thread whose reply is on its way: wait for it, do not take a
             # dearer one meanwhile (and do not accept a sheet that may be stale)
             return {"wait": True}
+        c_open = self._c_open(case, threads)
+        if best and best[0] >= c_open - 0.002 * abs(c_open):
+            # a deal not clearly cheaper than the best opening scores 0 (P02 lot A: estimated
+            # 582 EUR below the opening, 2 902 EUR above it in the arena) - keep negotiating
+            log.info("%s: best %.0f not clearly below the opening %.0f", case["case_id"], best[0], c_open)
+            if moves_left(case, threads[best[1]]) > 1 and best[1] not in busy:
+                return {"supplier_id": best[1], "message": {"subject": f"Re: {case['title']}",
+                        "body": "Thank you. Your offer does not yet improve on your opening quote for us. "
+                                "Could you review your price?\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"}}
         if best and best[0] < self.c_alt:
             log.info("%s: accept %s at C=%.0f", case["case_id"], best[2], best[0])
             return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}

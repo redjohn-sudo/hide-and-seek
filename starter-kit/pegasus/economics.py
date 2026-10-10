@@ -39,8 +39,39 @@ def sheet(case, structure, price):
     return complete_offer(case, {**structure, "unit_price": round(price, 2)})
 
 
+RELATIONSHIP_GOALS = {"stabilise", "secure_supply"}
+SHOULD_COST_RATIO = 0.98  # full cost vs the package's should-cost: 0.977-0.986 on P01/P02/P03 (practice)
+
+
+def supplier_model(case, std, opening_price, facts):
+    """Our estimate of the supplier for the relationship term (strategic and bottleneck goals):
+    full cost = 0.98 x the part's should-cost when the package has one. None otherwise, and for
+    other goals (the term does not apply)."""
+    b = case["buyer"]
+    if b.get("category_goal") not in RELATIONSHIP_GOALS or not b.get("relationship_eur_per_point"):
+        return None
+    fc = None
+    for part in case.get("parts", []):
+        f = (facts or {}).get(f"cost:{part.split(':')[1]}") or {}
+        if f.get("unit_cost") and f.get("price_unit", 1) == 1:
+            fc = f["unit_cost"] * SHOULD_COST_RATIO
+            break
+    if not fc:
+        # no should-cost: no estimate (an opening-price guess broke the sandbox D01: 0.979 -> 0)
+        return None
+    return {"standard": {k: v for k, v in std.items() if k != "_supplier"},
+            "interest_rate": b.get("interest_rate", 0.08), "full_cost": fc}
+
+
 def cost(case, terms, std=None):
-    return total_cost(case, terms, std or {})
+    """C with the kit's cost function; if `std` carries our supplier estimate ("_supplier"), the
+    relationship term is priced too - a price below the supplier's cost is not a bargain (P02:
+    344.20 EUR cost 143 193 EUR of relationship charge, the deal scored 0)."""
+    std = std or {}
+    sup = std.get("_supplier")
+    clean_std = {k: v for k, v in std.items() if k != "_supplier"}
+    clean = {k: v for k, v in terms.items() if k != "_supplier"}
+    return total_cost(case, clean, clean_std, sup)
 
 
 def ok(case, terms, std=None):
@@ -55,9 +86,23 @@ def alt_cost(case):
     return total_cost(case, alt["terms"])
 
 
+def cheapest_price(case, structure, std, lo, hi):
+    """With a relationship charge C(P) is U-shaped: the price where it bottoms out."""
+    for _ in range(60):
+        a, b = lo + (hi - lo) / 3, hi - (hi - lo) / 3
+        if cost(case, sheet(case, structure, a), std) <= cost(case, sheet(case, structure, b), std):
+            hi = b
+        else:
+            lo = a
+    return round((lo + hi) / 2, 2)
+
+
 def price_for(case, structure, target_c, std=None, lo=0.01, hi=None):
-    """Unit price at which `structure` costs `target_c` (C rises with the price)."""
+    """Unit price at which `structure` costs `target_c` (C rises with the price above the bottom
+    of the U; a target below the bottom is unreachable and gets the bottom price)."""
     hi = hi or max(10 * (case["buyer"].get("fallback_unit_price") or 1), 1.0)
+    if (std or {}).get("_supplier"):
+        lo = max(lo, cheapest_price(case, structure, std, lo, hi))
     for _ in range(40):
         mid = (lo + hi) / 2
         if cost(case, sheet(case, structure, mid), std) > target_c:
@@ -209,8 +254,11 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
             p = min(p, ask)
         t = sheet(case, s, p)
         if p > 0.01 and ok(case, t, std):
-            rows.append((p, distance(case, s, current), s))
-    rows.sort(key=lambda r: (-round(r[0], 2), r[1]))
+            rows.append((p, distance(case, s, current), s, cost(case, t, std)))
+    # a structure whose C overshoots the target (its price floored at the bottom of the U, P03 at
+    # 12 months) never beats one that meets it; then highest price, then closest to the supplier
+    rows.sort(key=lambda r: (r[3] > target_c + 0.01, -round(r[0], 2), round(r[3] / max(target_c, 1) * 1e4), r[1]))
+    rows = [(p, d, s) for p, d, s, _ in rows]
     if not rows:
         return []
     main = rows[0][2]
@@ -227,10 +275,14 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
 
 
 def best_at_price(case, price, std):
-    """The structure that costs us least at a given price, and that C."""
+    """The structure that costs us least at a given price (never below the bottom of its U when
+    a relationship charge applies), and that C."""
     best = None
     for s in grid(case):
-        t = sheet(case, s, price)
+        p = price
+        if (std or {}).get("_supplier"):
+            p = max(price, cheapest_price(case, s, std, 0.01, max(10 * price, 1.0)))
+        t = sheet(case, s, p)
         if ok(case, t, std):
             c = cost(case, t, std)
             if best is None or c < best[0]:
