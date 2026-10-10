@@ -55,6 +55,9 @@ MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one pa
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+# quote: facts as claims come back "irrelevant - does not concern this part or our company" (lot U: P08 0.67 -> 0.53,
+# P11 0.84 -> 0.76): off
+QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
@@ -1369,10 +1372,10 @@ class PegasusAgent:
                 rq = self.fallback_claims.rival_quote_claim(sid, part, price)
             except Exception:
                 rq = []
-            if rq and not st.get("rival_quote_sent") and not any(set(c["refs"]) == set(rq[0]["refs"]) for c in chosen):
+            if QUOTE_CLAIMS and rq and not st.get("rival_quote_sent") and not any(set(c["refs"]) == set(rq[0]["refs"]) for c in chosen):
                 st["rival_quote_sent"] = True
                 chosen = rq + chosen  # a rival's recent quotation for the same part leads
-            if qc and not st.get("quote_claim_sent") and not any(set(c["refs"]) == set(qc[0]["refs"]) for c in chosen):
+            if QUOTE_CLAIMS and qc and not st.get("quote_claim_sent") and not any(set(c["refs"]) == set(qc[0]["refs"]) for c in chosen):
                 st["quote_claim_sent"] = True
                 chosen = qc + chosen  # its own earlier quotation leads
             if oc and not st.get("order_claim_sent") and not any(set(c["refs"]) == set(oc[0]["refs"]) for c in chosen):
