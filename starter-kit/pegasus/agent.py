@@ -422,8 +422,7 @@ class PegasusAgent:
             if not moved:
                 log.info("%s %s: sheets would repeat and it stopped moving - closing", case["case_id"], sid)
                 return self._done(case, threads, sid, st, busy)
-            for t in now:  # a token step so the message is not a verbatim repeat
-                t["unit_price"] = round(min(t["unit_price"] * 1.002, st.get("ask") or 1e18), 2)
+            st["held"] = st.get("held", 0) + 1  # same prices on purpose; subject and wording differ
         st["last_sheets"] = [dict(t) for t in now]
         for ts in msg.get("term_sheets") or []:  # what we have offered so far (for `remaining_trade`)
             st.setdefault("proposed", []).append({f: v for f, v in ts["terms"].items() if f != "unit_price"})
@@ -606,7 +605,10 @@ class PegasusAgent:
             return {"wait": True}
         c_open = self._c_open(case, threads)
         final = best and latest(threads[best[1]]).get("status") in ("final_offer", "agreed")
-        margin = 0.0 if final else 0.002  # after its last word, 'review your price' makes it walk (P02 lot E)
+        # After its last word, asking again makes it walk (P02 lot E). When our alternative is no
+        # better than the opening, a deal estimated within the model's error band (0.5 %) above the
+        # opening costs at worst the same 0 as walking - and may well score: take it.
+        margin = -0.005 if (final and self.c_alt >= c_open) else (0.0 if final else 0.002)
         if best and best[0] >= c_open - margin * abs(c_open):
             # a deal not clearly cheaper than the best opening scores 0 (P02 lot A: estimated
             # 582 EUR below the opening, 2 902 EUR above it in the arena) - keep negotiating

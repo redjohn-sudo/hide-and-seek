@@ -49,8 +49,9 @@ def prior_flags(sid, case):
                      "wants_volume": "volume_per_year"}.get(flag)
             if field is None or field in neg:
                 out[flag] = True
+    sig_of = {"chargeback_eur_per_complaint": "chargeback_too_high", "lead_time_days": "lead_time_firm"}
     for k, v in (m.get("stated") or {}).items():
-        if k in ("chargeback_eur_per_complaint", "lead_time_days"):
+        if k in sig_of and (m.get("signals") or {}).get(sig_of[k], 0) >= PRIOR_MIN:
             stated[k] = v
     return out, stated
 
