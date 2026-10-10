@@ -54,7 +54,9 @@ MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new
 MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
-CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
+CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
+STEP_HI = float(os.environ.get("PEGASUS_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
 PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
@@ -489,6 +491,7 @@ class PegasusAgent:
             target = max(target, min(prev + step, c_s))
         if target_c is not None:
             target = min(target, target_c) if moves_left(case, events) > 3 else target
+        target = self._paced(case, threads, sid, st, target, c_s)
         if target >= c_s * (1 - 1e-4):
             return self._done(case, threads, sid, st, busy, converged=True)
         st["offers"] += 1
@@ -771,6 +774,30 @@ class PegasusAgent:
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
 
+    def _paced(self, case, threads, sid, st, target, c_s):
+        """One supplier, no relationship charge: the price of our main package moves between
+        STEP_LO and STEP_HI of itself per round, the same step for every package (equal C). The
+        distributor bots close as soon as a step looks small (P08: +1.2 % -> final 5.37) and close
+        high after a big one (P07: +4.8 % -> final 5.52 at round 2; +1.5-2 % -> 5.46 at round 4)."""
+        if STEP_HI <= 0 or st["std"].get("_floor") or len(live_threads(threads)) > 1:
+            return target
+        prev = st.get("last_target")
+        s0 = st.get("anchor_structure") or (st.get("last_sheets") and {f: st["last_sheets"][0].get(f) for f in eco.fields(case)})
+        if prev is None or not s0:
+            return target
+        try:
+            p_prev = eco.price_for(case, s0, prev, st["std"])
+            p_new = eco.price_for(case, s0, target, st["std"])
+        except Exception:
+            return target
+        if p_prev <= 0:
+            return target
+        p = min(max(p_new, p_prev * (1 + STEP_LO)), p_prev * (1 + STEP_HI))
+        if abs(p - p_new) < 0.005:
+            return target
+        t = eco.cost(case, eco.sheet(case, s0, round(p, 2)), st["std"])
+        return min(max(t, prev), c_s)
+
     def _clause_probe(self, case, threads, sid, st, status, terms, busy):
         """It agreed to a package with the index clause it wanted (P02: 361.21 / 90 days / CU clause
         at once, 0.735 - the clause alone costs us 17.5 kEUR). Once, ask for the same package
@@ -803,8 +830,10 @@ class PegasusAgent:
                 "body": ("Thank you. Then we stay with the package you agreed to: please confirm the attached "
                          "term sheet and we place the order.\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing"),
                 "term_sheets": [{"terms": pr["agreed"]}]}}
-        if pr or status != "agreed" or not terms or not terms.get("index_clause"):
-            return None
+        if pr or status != "agreed" or not terms or not terms.get("index_clause") or not st["std"].get("_floor"):
+            return None  # strategic suppliers only: elsewhere the clause is its condition (P18) and cheap
+        if any(m.get("status") == "final_offer" for m in events if m.get("from") != "buyer"):
+            return None  # never after its last word
         if None not in ((case.get("term_options") or {}).get("index_clause") or []) or moves_left(case, events) <= 3:
             return None
         structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
@@ -818,7 +847,7 @@ class PegasusAgent:
             return None
         p = eco.price_for(case, free, c_bottom + 0.5 * (c_agreed - c_bottom), rel)
         sheet = eco.sheet(case, free, max(p, pb))
-        if not eco.ok(case, sheet, st["std"]):
+        if not eco.ok(case, sheet, st["std"]) or not terms["unit_price"] <= sheet["unit_price"] <= 1.05 * terms["unit_price"]:
             return None
         st["clause_probe"] = {"agreed": agreed, "c_agreed": c_agreed}
         log.info("%s %s: agreed with a clause - probe without it at %.2f", case["case_id"], sid, sheet["unit_price"])
