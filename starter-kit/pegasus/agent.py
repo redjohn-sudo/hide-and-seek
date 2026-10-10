@@ -23,6 +23,12 @@ from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 from . import economics as eco
 from . import adapt as rules
 from . import guard, prose, reader
+
+try:  # Nevil's evidence lane (hollerau/evidence, PR #4): filtered claim union + planner hints
+    from hollerau.evidence import adapter as team_claims
+except Exception:  # pragma: no cover - the package is optional
+    team_claims = None
+TEAM_CLAIMS = os.environ.get("PEGASUS_TEAM_CLAIMS", "1") == "1" and team_claims is not None
 from .claims import Claims
 from .claims_intel import Claims as IntelClaims
 from .intel_bridge import Intelligence
@@ -244,6 +250,15 @@ class PegasusAgent:
 
     # -- decision ------------------------------------------------------------------------------
     def decide(self, case, threads, sid=None, busy=()):
+        out = self._decide(case, threads, sid, busy)
+        if out and isinstance(out.get("message"), dict) and not out["message"].get("action") and out["message"].get("body"):
+            who = out.get("supplier_id")
+            n = sum(m.get("from") == "buyer" for m in threads.get(who, [])) + 1
+            subj = out["message"].get("subject") or f"Re: {case['title']}"
+            out["message"]["subject"] = f"{subj} ({n})"[:300]
+        return out
+
+    def _decide(self, case, threads, sid=None, busy=()):
         if case["case_id"] != self.case_id:
             self._prepare(case)
         live = live_threads(threads)
@@ -286,7 +301,7 @@ class PegasusAgent:
                 st["floor_hits"] = st.get("floor_hits", 0) + 1
             if st["last_signals"]:
                 log.info("%s %s heard: %s", case["case_id"], sid, sorted(st["last_signals"]))
-        if rules.must_close(st) and status != "agreed" and sheet_id:
+        if rules.must_close(st, case) and status != "agreed" and sheet_id:
             return self._done(case, threads, sid, st, busy)
 
         target_c = (self.playbook.get(case["case_id"]) or {}).get("target_c")
@@ -572,6 +587,7 @@ class PegasusAgent:
         if rules.active(st):  # the supplier stated a constraint: honour it in every sheet
             picked = rules.pick_sheets(case, st, target, current, st.get("ask"))
             if picked:
+                st["trade_offered"] = True
                 return picked
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
@@ -658,14 +674,27 @@ class PegasusAgent:
         rivals = sorted(rivals, key=lambda r: r[1])[:1]
         # a rival's offer in our own words (sandbox D02: 0.723 vs 0.702 with the dossier wording),
         # then the dossier's data claims, then ours as fallback - three at most
-        chosen = self.fallback_claims.pick(sid, part, price, rivals=rivals, rivals_only=True) if rivals else []
-        try:
-            if self.claims is not self.fallback_claims:
-                chosen += self.claims.pick(sid, part, price, st["drivers"])[: 3 - len(chosen)]
-        except Exception as e:
-            log.warning("%s intel claims failed: %s", sid, e)
-        if len(chosen) < 3:
-            chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
+        chosen = None
+        if TEAM_CLAIMS:
+            try:  # the team's filters drop claims that work against us (volume to a saturated supplier, ...)
+                cands = ([x for r in rivals for x in self.fallback_claims.rival_claim(*r)]
+                         + self.fallback_claims.candidates(sid, part, price, st["drivers"]))
+                picked = team_claims.pegasus_claims(case, self.pkg, cands, used=self.fallback_claims.used,
+                                                    supplier=sid)[:3]
+                team_claims.remember(picked, sid, self.fallback_claims.used)
+                chosen = [{"refs": list(c.ids), "sentence": c.sentence} for c in picked]
+            except Exception as e:
+                log.warning("%s team claims failed (%s) - ours instead", sid, e)
+                chosen = None
+        if chosen is None:
+            chosen = self.fallback_claims.pick(sid, part, price, rivals=rivals, rivals_only=True) if rivals else []
+            try:
+                if self.claims is not self.fallback_claims:
+                    chosen += self.claims.pick(sid, part, price, st["drivers"])[: 3 - len(chosen)]
+            except Exception as e:
+                log.warning("%s intel claims failed: %s", sid, e)
+            if len(chosen) < 3:
+                chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         prev_their = st["seen"][-2] if len(st["seen"]) >= 2 else None
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:

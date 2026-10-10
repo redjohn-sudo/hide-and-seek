@@ -27,7 +27,9 @@ def _figure_ok(sentence, refs, facts):
     """The figure written next to the IDs matches the facts (arena tolerance: ±0.5 pt for %, else ±0.5 %)."""
     vals = [facts.get(r) or {} for r in refs]
     words = re.sub(r"\b[a-z]+:[\w.:@#/-]+", "", sentence)  # any ID-like token (part:, sup:, ...)
-    words = re.sub(r"\b\d{4}-\d{2}\b", "", words)            # months are wording, not figures
+    words = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", words)      # dates, months and quarters are wording,
+    words = re.sub(r"\b\d{4}-\d{2}\b", "", words)            # not figures
+    words = re.sub(r"\b\d{4}Q[1-4]\b", "", words)
     nums = [float(x) for x in NUM_RE.findall(words)]
     if not nums:
         return True

@@ -50,18 +50,53 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["signals
                                                 "quote": {"type": "string"}}}}}}
 
 KEYWORDS = {
-    "wants_faster_payment": r"faster payment|shorter payment|payment .{0,30}help|cash ?flow",
-    "wants_volume_commitment": r"which volume|binding (?:higher )?volume|volume (?:can you )?commit|higher volume would",
-    "wants_longer_contract": r"longer contract|planning certainty|longer (?:term|commitment)",
-    "requires_index_clause": r"index clause.{0,60}(?:requirement|required|must)|cannot (?:maintain a )?fix(?:ed)? price|must apply the .{0,20}index",
-    "price_frozen": r"frozen|freeze|no price reduction|talk about the terms instead",
-    "needs_internal_approval": r"clarify (?:this )?internally|approval from (?:our )?management|needs approval",
-    "arguments_rejected": r"does not change our calculation|not our reality|already (?:taken|factored)",
-    "chargeback_too_high": r"chargeback.{0,40}(?:too much|too high|way too)",
-    "lead_time_firm": r"(?:maintain|keep) (?:a |the )?lead time|overtime|premium.{0,30}(?:lead|deliver)",
+    "wants_faster_payment": (r"(?:faster|fast|shorter|quick) (?:payment|cash)|pay(?:ing)? faster|accelerate payment|"
+        r"cash ?flow|cash is (?:tight|king)|(?:need|crucial for|good for).{0,30}(?:the |our )?cash|"
+        r"getting (?:paid|the cash).{0,45}(?:help|important|great)|"
+        r"payment.{0,65}(?:help(?:s)? us|support(?:s)? our cash|allows? us|allowing us|is exactly what we need|is (?:good|great|perfect) for us)|"
+        r"(?:selected|select|picked).{0,35}payment.{0,35}(?:reduced|reduce)|"
+        r"(?:in exchange for|in return for|with the improved).{0,30}payment|"
+        r"payment.{0,25}(?:to support|to provide).{0,25}(?:better|competitive|favorable)|"
+        r"(?:like|take).{0,35}payment.{0,30}(?:dropped|works best)|"
+        r"(?:payment|liquidity).{0,45}(?:not feasible for our liquidity|in exchange for (?:this |a )?(?:better price|price reduction))|"
+        r"payment.{0,65}we can reduce (?:our |the )?price"),
+    "wants_volume_commitment": (r"(?:which|what).{0,15}volume.{0,30}commit|volume.{0,30}(?:can commit|can you commit|you can award|intend to order)|"
+        r"(?:please |could you |can you |we ask|we kindly ask|we would like to know|we need|still need|require|send over|not yet provided|still not provided).{0,80}(?:volume|binding release schedule)|"
+        r"(?:binding|higher|increased).{0,30}volume.{0,70}(?:help|improve|allow)|"
+        r"(?:movement|reduction).{0,50}commitment to (?:a )?higher volume|"
+        r"volume.{0,45}(?:allows? a price reduction|commitment.{0,20}allows? us to adjust)|"
+        r"(?:without|need).{0,25}(?:concrete volume data|actual volume figures)|"
+        r"(?:require|need|receiving|request for).{0,40}binding (?:commitment|release schedule).{0,30}|"
+        r"(?:not yet|still not).{0,15}answered.{0,35}binding volume|"
+        r"volume commitment.{0,25}helps? us plan|(?:need|restricted).{0,35}increased volume"),
+    "wants_longer_contract": (r"longer contract|planning (?:certainty|security)|longer (?:term|commitment)|"
+        r"extended (?:contract|duration)|contract.{0,60}(?:long.term stability|mutual stability|valuable stability)|"
+        r"contract.{0,70}(?:allows? us to (?:reduce|improve)|allows? a price reduction)|"
+        r"contract duration.{0,40}(?:price reduction|planning)|"
+        r"extend the contract.{0,50}stability"),
+    "requires_index_clause": (r"(?:index|preisgleitklausel).{0,35}(?:strict requirement|required|mandatory)|"
+        r"(?:must|require|insist on|subject to).{0,65}(?:index|preisgleitklausel)|"
+        r"cannot (?:maintain |offer )?(?:a )?fix(?:ed)? pric"),
+    "price_frozen": r"(?:frozen|freeze).{0,35}(?:price|reduction)|(?:price|reduction).{0,35}(?:frozen|freeze)|no price reduction|talk about the terms instead|cannot give up margin right now",
+    "needs_internal_approval": r"(?:need|must|have to).{0,20}(?:clarify|check).{0,20}internally|(?:step|reduction).{0,30}(?:needs|requires) approval|approval from (?:our )?management",
+    "arguments_rejected": (r"(?:does not|doesn't|do not).{0,25}(?:change|affect|impact|alter).{0,30}(?:calculation|position|baseline|pricing|assessment)|"
+        r"not our reality|already (?:been )?(?:fully )?(?:taken|factored)|"
+        r"(?:data|figures|records).{0,35}(?:does not concern|do not match|do not exist|do not warrant)|"
+        r"(?:points|arguments).{0,30}do not introduce new factors|cannot give up margin right now"),
+    "chargeback_too_high": r"(?:chargeback|penalty).{0,40}(?:too much|too high|way too)|(?:too high|too much).{0,25}(?:chargeback|penalty)",
+    "lead_time_firm": (r"(?:maintain|keep|set|adjust).{0,28}(?:lead time|lieferzeit).{0,65}(?:must|quality|reliable|rush costs)|"
+        r"(?:must|have to|need to|provided we).{0,35}(?:maintain|keep|set|adjust).{0,30}(?:lead time|lieferzeit)|"
+        r"earliest (?:possible |firm )?(?:lead time|lieferzeit|delivery)|"
+        r"(?:fastest|shortest).{0,35}lead time|days is the shortest|"
+        r"lead time.{0,20}is firm|guarantee.{0,25}lead time|overtime|"
+        r"(?:shorter|expedited).{0,30}(?:lead time|schedules).{0,50}(?:premium|increase)|"
+        r"(?:lead time|lieferzeit).{0,40}(?:premium|rush costs)"),
     "capacity_tight": r"capacity utili[sz]ation|allocation|tight capacity|fully booked",
     "free_capacity": r"free capacity",
-    "cost_floor": r"absolute (?:limit|bottom)|bottom line|cannot (?:go|drop) (?:any )?lower|as low as i can",
+    "cost_floor": (r"absolute (?:limit|bottom|best offer)|bottom line|bottom of the barrel|"
+        r"(?:cannot|can't) (?:go|drop|reduce).{0,25}(?:lower|further|anymore)|cannot be reduced further|"
+        r"as low as i can|as far as we can go|(?:reached|at) the limit|"
+        r"(?:best possible offer|best we can do)|can't run the machines for less|our last price"),
 }
 
 
