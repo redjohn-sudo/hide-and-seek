@@ -51,8 +51,8 @@ MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))
 # (0.5: P01 opens near 123 like the 0.998 run; 0 = open at the bottom of the U, 128.95: 0.949-0.956)
 ANCHOR_ALPHA = float(os.environ.get("PEGASUS_ANCHOR_ALPHA", "0.5"))
 MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
-MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0.025"))  # ... and at most this share of its price per round
-NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "1") == "1"
+MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
+NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
 PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
@@ -1060,7 +1060,8 @@ class PegasusAgent:
                 oc = self.fallback_claims.order_claim(sid, part, price)
             except Exception:
                 oc = []
-            if oc and not (set(oc[0]["refs"]) & self.fallback_claims.used) and not any(set(c["refs"]) == set(oc[0]["refs"]) for c in chosen):
+            if oc and not st.get("order_claim_sent") and not any(set(c["refs"]) == set(oc[0]["refs"]) for c in chosen):
+                st["order_claim_sent"] = True  # (the team filter drops po: claims; this one leads on purpose)
                 chosen = oc + chosen  # the order-history argument that moves distributors leads
                 self.fallback_claims.used |= set(oc[0]["refs"])
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
@@ -1072,7 +1073,15 @@ class PegasusAgent:
         for c in chosen[cap:]:  # not sent: give their IDs back to the ledger
             self.fallback_claims.used -= set(c["refs"])
             self.fallback_claims.used.discard((sid, tuple(c["refs"])))
-        chosen = chosen[:cap]
+        kinds, kept = set(), []
+        for c in chosen:  # one argument per kind: three forecasts came back verified/duplicate/duplicate (P07)
+            kind = str(c["refs"][0]).split(":")[0] if c.get("refs") else None
+            if kind and kind != "offer" and kind in kinds:
+                self.fallback_claims.used -= set(c["refs"])
+                continue
+            kinds.add(kind)
+            kept.append(c)
+        chosen = kept[:cap]
         lines += [c["sentence"] for c in chosen]
         lines += rules.lines(case, st, sheets)
         attachments, extra_refs = [], []

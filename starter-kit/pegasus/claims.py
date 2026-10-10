@@ -118,7 +118,8 @@ class Claims:
         rows.sort(key=lambda kv: kv[1].get("date") or "")
         low = min(rows, key=lambda kv: kv[1]["unit_price"])
         latest = rows[-1]
-        if low[1]["unit_price"] >= 0.97 * price or low[0] == latest[0]:
+        if (low[1]["unit_price"] >= 0.97 * price or low[0] == latest[0]
+                or low[1]["unit_price"] >= 0.97 * latest[1]["unit_price"]):  # a flat history reads "costs went up"
             return []
         return [{"refs": [low[0], latest[0]], "weight": 60,
                  "sentence": (f"Our order history for this part shows {low[1]['unit_price']:.2f} EUR ({low[0]}) "
