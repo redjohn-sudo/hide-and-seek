@@ -608,17 +608,24 @@ class PegasusAgent:
         return {"supplier_id": prefer or live_threads(threads)[0], "message": {"action": {"type": "walk_away"}}}
 
     # -- the e-mail ----------------------------------------------------------------------------
-    def _prefer_anchor(self, st, picks):
-        """The structure chosen at the expected price stays the main sheet while its price is within
-        1 % of the best: the lever it carries (P01: April) is asked from the first e-mail on."""
+    def _prefer_anchor(self, case, st, target, picks):
+        """The structure chosen at the expected price leads while its price at the target is within
+        ANCHOR_KEEP of the best; it is inserted when the ranking left it out (P01: at a low target the
+        November start carries a higher price than April, yet April is what the supplier grants)."""
         a = st.get("anchor_structure")
         if not a or not picks:
             return picks
-        for i, (p, s) in enumerate(picks):
-            if s == a and i > 0:
-                if p >= ANCHOR_KEEP * picks[0][0]:
-                    return [picks[i]] + picks[:i] + picks[i + 1:]
-                break
+        structures = [s for _, s in picks]
+        if a in structures:
+            i = structures.index(a)
+            if i > 0 and picks[i][0] >= ANCHOR_KEEP * picks[0][0]:
+                return [picks[i]] + picks[:i] + picks[i + 1:]
+            return picks
+        p = eco.price_for(case, a, target, st["std"])
+        if st.get("ask"):
+            p = min(p, st["ask"])
+        if p >= ANCHOR_KEEP * picks[0][0] and eco.ok(case, eco.sheet(case, a, p), st["std"]):
+            return [(p, a)] + picks[:2]
         return picks
 
     def _sheets(self, case, st, target):
@@ -631,7 +638,7 @@ class PegasusAgent:
                 return picked
         series, required = st.get("index_preference", (None, False))
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
-        picks = self._prefer_anchor(st, eco.best_for_target(case, target, st["std"], current, st.get("ask"),
+        picks = self._prefer_anchor(case, st, target, eco.best_for_target(case, target, st["std"], current, st.get("ask"),
                                    adapt=adapt, index_series=series, require_index=required))
         if st.get("capacity_pressure") and picks:
             # Replace a cost-identical rush duplicate with a priced, feasible standard-lead
