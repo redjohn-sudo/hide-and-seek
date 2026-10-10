@@ -257,7 +257,14 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
             rows.append((p, distance(case, s, current), s, cost(case, t, std)))
     # a structure whose C overshoots the target (its price floored at the bottom of the U, P03 at
     # 12 months) never beats one that meets it; then highest price, then closest to the supplier
-    rows.sort(key=lambda r: (r[3] > target_c + 0.01, -round(r[0], 2), round(r[3] / max(target_c, 1) * 1e4), r[1]))
+    # keep only structures that meet the target; if none can (target below every U bottom), only
+    # those within 0.5 % of the cheapest reachable C - never a 12-month sheet 254 k EUR over budget
+    feasible = [r for r in rows if r[3] <= target_c + 0.01]
+    if not feasible and rows:
+        floor = min(r[3] for r in rows)
+        feasible = [r for r in rows if r[3] <= floor * 1.005]
+    rows = feasible
+    rows.sort(key=lambda r: (-round(r[0], 2), round(r[3] / max(target_c, 1) * 1e4), r[1]))
     rows = [(p, d, s) for p, d, s, _ in rows]
     if not rows:
         return []

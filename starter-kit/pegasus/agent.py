@@ -113,6 +113,30 @@ class PegasusAgent:
                     out = min(out, eco.standing_cost(case, ts["terms"], st["std"]))
         return out
 
+    def closing(self, case, threads):
+        """Before the wave's cap: accept the cheapest standing sheet by OUR cost (relationship
+        charge included, standard terms filled) if it beats the alternative and the opening,
+        else walk away - the kit's closing_move ignores the relationship charge."""
+        if case["case_id"] != self.case_id:
+            self._prepare(case)
+        best = None
+        for s in live_threads(threads):
+            st = self.state.get(s) or self._thread(case, s, threads[s])
+            sheets = offered(threads[s])[:1]  # only the standing sheet can be accepted
+            for sid_sheet, terms in sheets:
+                if sid_sheet in self.refused or not eco.ok(case, terms, st["std"]):
+                    continue
+                c = eco.standing_cost(case, terms, st["std"])
+                if best is None or c < best[0]:
+                    best = (c, s, sid_sheet)
+        live = live_threads(threads)
+        if best and best[0] < min(self.c_alt, self._c_open(case, threads)):
+            return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}
+        if best and self.c_alt == float("inf"):
+            # no alternative: a deal at the opening still scores what no deal scores, and wins ties
+            return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}
+        return {"supplier_id": live[0], "message": {"action": {"type": "walk_away"}}} if live else None
+
     def refuse(self, sheet_id):
         """The arena refused to close on this sheet: never try it again."""
         self.refused.add(sheet_id)
