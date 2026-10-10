@@ -337,9 +337,20 @@ class PegasusAgent:
             lines.append("We are happy to pay faster if that helps your cash flow, in exchange for a better price.")
         if len(sheets) > 1:
             lines.append("Each of the attached packages works for us; please choose the one that suits you best.")
+        # State the binding commitment the sheets carry - suppliers ask for it (P02: "Which volume
+        # can you commit to?" four times, unanswered) - and answer its direct questions.
+        main = sheets[0] if sheets else {}
+        fixed = case.get("fixed_terms", {})
+        vol = main.get("volume_per_year") or fixed.get("volume_per_year") or case["buyer"]["need_per_year"]
+        months = main.get("contract_months") or fixed.get("contract_months")
+        commit = f"We commit to a binding volume of {vol:,} pcs per year"
+        lines.append(commit + (f" over {months} months." if months else "."))
+        asked = (latest(threads[sid]).get("body") or "").lower()
+        if re.search(r"lead ?time|lieferzeit|delivery date", asked) and "?" in asked:
+            lines.append(f"Our required lead time is {case['buyer']['need_lead_time_days']} days.")
         if k == 0:
             lines.append("Could you send us a cost breakdown for this part?")
-        lines += ["We value our cooperation and would like an agreement that covers our full need.", "",
+        lines += ["We value our cooperation.", "",
                   "Best regards", "Hollerau Pumpenwerke GmbH, Purchasing"]
         refs = [r for c in chosen for r in c["refs"]]
         msg = {"subject": f"Re: {case['title']}", "body": "\n".join(lines),
