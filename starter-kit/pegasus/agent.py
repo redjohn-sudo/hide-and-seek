@@ -43,6 +43,7 @@ MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap
 RFQ_CAP = float(os.environ.get("PEGASUS_RFQ_CAP", "0.995"))   # a bidder never gets a target above this x the best rival
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
 ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
+MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))  # strategic suppliers: a package may cost us at most this share of the best package's saving more (it picks)
 ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
@@ -234,10 +235,11 @@ class PegasusAgent:
                 st.setdefault("stated", {}).update(stated)
                 log.info("%s %s: remembered %s %s", case["case_id"], sid, sorted(flags), stated)
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
-                                     self.pkg.facts if self.pkg else {})
+                                     self.pkg.facts if self.pkg else {}, sid)
             if sup:
                 st["std"]["_floor"] = sup  # floors our prices; counted in C only to decide acceptance
-                log.info("%s %s: supplier full cost estimate %.2f", case["case_id"], sid, sup["full_cost"])
+                log.info("%s %s: supplier full cost estimate %.2f, cost of money %.1f %%", case["case_id"], sid,
+                         sup["full_cost"], 100 * sup["interest_rate"])
             st["anchor"] = self._anchor(case, sid, st)
         return st
 
@@ -278,12 +280,17 @@ class PegasusAgent:
         # anchor a November start looks cheaper (P01) - neither is where we will sign
         expected = p + EXPECT * max(open_p - p, 0)
         cur = {f: v for f, v in ref.items() if f in eco.fields(case)}
+        if st["std"].get("_floor"):
+            # strategic supplier: the structure whose U bottom is lowest once its margin counts, opened
+            # at that bottom - every sheet we send must be one we can accept, it may agree to it at once
+            bottoms = eco.bottoms(case, ranked, st["std"], max(10 * open_p, 1.0))
+            if bottoms:
+                _, s_b, p_b = bottoms[0]
+                st["anchor_structure"] = s_b
+                return eco.cost(case, eco.sheet(case, s_b, max(p, p_b)), st["std"])
         best = eco.best_at_price(case, expected, st["std"], cur)
         if best:
             st["anchor_structure"] = best[1]
-            if st["std"].get("_floor"):  # strategic supplier: open at most as far under its floor as its ask is above it
-                fl = eco.price_floor(case, best[1], st["std"], max(10 * open_p, 1.0))
-                p = max(p, fl)  # every sheet we send must be one we can accept: it may agree to it at once
             return eco.cost(case, eco.sheet(case, best[1], p), st["std"])
         return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
@@ -429,6 +436,7 @@ class PegasusAgent:
         if not st["std"].get("_floor"):
             return msg
         c_s = st.get("c_s_rel")
+        rel = eco.with_relationship(st["std"])
         kept = []
         for ts in msg.get("term_sheets") or []:
             t = ts["terms"]
@@ -437,11 +445,20 @@ class PegasusAgent:
             if t["unit_price"] < floor:
                 # the cap is per package: the price at which this package costs us what its
                 # standing offer costs us (345 at 14 days + index is not 345 at 90 days fixed)
-                cap = eco.price_for(case, s, c_s, eco.with_relationship(st["std"])) if c_s else floor
+                cap = eco.price_for(case, s, c_s, rel) if c_s else floor
                 if cap < floor - 0.005:
                     continue  # this package cannot beat its offer for us: do not send it
                 t["unit_price"] = round(min(floor, cap), 2)
-            kept.append(ts)
+            kept.append((eco.standing_cost(case, t, rel), ts))
+        if kept:
+            # The supplier picks the package best for IT. Floored at their own bottoms the packages
+            # no longer cost us the same: on P02 the 14-day + index clause package it "agreed" to
+            # scored 0.59 while the 90-day package beside it scored 1.08. Keep only the packages
+            # that stay within MESO_TOL of the best one, measured on the saving the best one makes.
+            c_best = min(c for c, _ in kept)
+            c_open = eco.standing_cost(case, st["open"], rel)
+            room = MESO_TOL * max(c_open - c_best, 0.0)
+            kept = [ts for c, ts in kept if c <= c_best + room]
         msg["term_sheets"] = kept
         return msg
 

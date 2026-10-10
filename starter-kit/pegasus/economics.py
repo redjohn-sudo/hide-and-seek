@@ -6,7 +6,10 @@ cost us at the price that leaves the supplier indifferent (its cash value unchan
 we find trades that are cheap for it and valuable for us.
 """
 
+import os
+import re
 from itertools import product
+from pathlib import Path
 
 from arena_kit.cost import closing_terms, complete_offer, must_haves_ok, supplier_value, total_cost
 
@@ -40,13 +43,43 @@ def sheet(case, structure, price):
 
 
 RELATIONSHIP_GOALS = {"stabilise", "secure_supply"}
-SHOULD_COST_RATIO = 0.98  # full cost vs the package's should-cost: 0.977-0.986 on P01/P02/P03 (practice)
+# full cost = the package's should-cost / 1.02: fitted on the arena's own relationship charges in our
+# ended deals, 0.9804 / 0.9804 / 0.9805 of the should-cost on P01 / P02 / P03 (charges reproduced
+# within 4-13 EUR once the supplier's cost of money is right)
+SHOULD_COST_RATIO = 1 / 1.02
+# the supplier's cost of money, fitted the same way: 9.6 % for the one whose correspondence asks to
+# be paid faster (P01: "Could you pay our invoices within 10 days? In return we would grant a cash
+# discount"), 6.6 % and 6.1 % for the two that never did (P02, P03); the buyer's 8 % fits none
+CASH_RATE, CALM_RATE = 0.096, 0.064
+CASH_WORDS = re.compile(r"pay (?:our invoices )?(?:earlier|within \d+ days)|cash discount|liquidity|short of cash"
+                        r"|bank is watching|skonto", re.I)
 
 
-def supplier_model(case, std, opening_price, facts):
+def cash_strapped(sid, facts, root=None):
+    """Does the correspondence show that this supplier's money is dear - an e-mail asking to be paid
+    within N days against a cash discount, a call note headed Liquidity ("the bank is watching every
+    month")? Read from the data package on disk (`ARENA_DATA`, plus the Sunday release)."""
+    roots = [Path(root or os.environ.get("ARENA_DATA", "data/package"))]
+    roots.append(roots[0] / "release-sunday")
+    for k, v in (facts or {}).items():
+        if not k.startswith("doc:") or not isinstance(v, dict) or v.get("supplier") != sid:
+            continue
+        text = v.get("title") or ""
+        for r in roots:
+            p = r / "correspondence" / (k[4:] + ".md")
+            if p.is_file():
+                text = p.read_text(encoding="utf-8", errors="replace")
+                break
+        if CASH_WORDS.search(text):
+            return True
+    return False
+
+
+def supplier_model(case, std, opening_price, facts, sid=None):
     """Our estimate of the supplier for the relationship term (strategic and bottleneck goals):
-    full cost = 0.98 x the part's should-cost when the package has one. None otherwise, and for
-    other goals (the term does not apply)."""
+    full cost = the part's should-cost / 1.02 when the package has one, cost of money from the
+    correspondence (see `cash_strapped`). None otherwise, and for other goals (the term does not
+    apply)."""
     b = case["buyer"]
     if b.get("category_goal") not in RELATIONSHIP_GOALS or not b.get("relationship_eur_per_point"):
         return None
@@ -59,8 +92,10 @@ def supplier_model(case, std, opening_price, facts):
     if not fc:
         # no should-cost: no estimate (an opening-price guess broke the sandbox D01: 0.979 -> 0)
         return None
+    sid = sid or (case.get("suppliers") or [None])[0]
+    rate = CASH_RATE if sid and cash_strapped(sid, facts) else CALM_RATE
     return {"standard": {k: v for k, v in std.items() if k != "_supplier"},
-            "interest_rate": b.get("interest_rate", 0.08), "full_cost": fc}
+            "interest_rate": rate, "full_cost": fc}
 
 
 def cost(case, terms, std=None):
@@ -87,6 +122,21 @@ def price_floor(case, structure, std, hi):
     if not std or not std.get("_floor"):
         return 0.01
     return cheapest_price(case, structure, with_relationship(std), 0.01, hi)
+
+
+def bottoms(case, ranked, std, hi):
+    """Every ranked structure at the bottom of its U, cheapest first: [(C with the relationship
+    charge, structure, bottom price)]. Which package is best for us once the supplier's margin
+    counts is not which is best at its price: on P01 the cash-strapped foundry's charge outgrows
+    the interest 90-day payment saves, so 14-day payment at 130.65 (score 1.000 if accepted)
+    beats 90 days at 133.41 (0.916)."""
+    rel = with_relationship(std)
+    out = []
+    for _, s, _ in ranked:
+        p = cheapest_price(case, s, rel, 0.01, hi)
+        out.append((cost(case, sheet(case, s, p), rel), s, p))
+    out.sort(key=lambda x: x[0])
+    return out
 
 
 def ok(case, terms, std=None):
