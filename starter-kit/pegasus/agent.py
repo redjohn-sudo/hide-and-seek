@@ -1321,6 +1321,13 @@ class PegasusAgent:
             lines.append(f"Our required lead time is {case['buyer']['need_lead_time_days']} days.")
         if k == 0:
             lines.append("Could you send us a cost breakdown for this part?")
+        if (not st.get("tier_asked") and re.search(r"discount tiers?|volume tiers?|preisliste|price list|staffel", asked)
+                and latest(threads[sid]).get("status") == "open"):
+            # a distributor prices from list prices and volume tiers, not costs (P07): ask what moves it
+            # to the next tier, the one lever its own words name
+            st["tier_asked"] = True
+            lines.append("You mention your volume discount tiers: which volume or contract term qualifies for "
+                         "your next tier? We are ready to commit to it in the attached packages.")
         # Escalate on the current counter, before a final offer; no extra round is consumed.
         if (APPROVAL_REVIEW and sheets and not st.get("approval_requested")
                 and latest(threads[sid]).get("status") == "open" and st["offers"] <= 2
