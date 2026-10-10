@@ -217,6 +217,14 @@ class PegasusAgent:
             else:
                 return self._done(case, threads, sid, st, busy)
         if status == "final_offer" and not (self.push_after_final and not st.get("pushed")):
+            trade = self._fresh_final_trade(case, threads, sid, st, c_s, busy)
+            if trade:
+                target, sheet = trade
+                st["final_trade_sent"] = True
+                st["offers"] += 1
+                st["last_target"] = target
+                return self._send(case, threads, sid, st, target, st["offers"] - 1,
+                                  sheets=[sheet], final_trade=True)
             return self._done(case, threads, sid, st, busy)
         if moves_left(case, events) <= 1:
             return self._done(case, threads, sid, st, busy)
@@ -250,7 +258,10 @@ class PegasusAgent:
             return self._done(case, threads, sid, st, busy)
         st["offers"] += 1
         st["last_target"] = target
-        msg = self._message(case, threads, sid, st, target, k)
+        return self._send(case, threads, sid, st, target, k)
+
+    def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
+        msg = self._message(case, threads, sid, st, target, k, sheets, final_trade)
         alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
         session_offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
                           for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
@@ -258,7 +269,108 @@ class PegasusAgent:
                                     ask=st.get("ask"), alt_price=alt.get("unit_price"))
         for p in problems:
             log.warning("%s %s guard: %s", case["case_id"], sid, p)
+        for ts in msg.get("term_sheets", []):
+            structure = {f: ts["terms"].get(f) for f in eco.fields(case)}
+            history = st.setdefault("proposed_structures", [])
+            if structure not in history:
+                history.append(structure)
         return {"supplier_id": sid, "message": msg}
+
+    def _index_preference(self, case, events):
+        """A mentioned allowed family; a requirement also needs a structured supplier clause."""
+        if "index_clause" not in case["negotiable"]:
+            return None, False
+        text = latest(events).get("body", "").lower()
+        options = [c for c in case.get("term_options", {}).get("index_clause", []) if c]
+        families = {c["series"] for c in options}
+        std = supplier_reference(case, events)
+        structured = [(t.get("index_clause") or {}).get("series") for _, t in offered(events)
+                      if eco.ok(case, t, std)]
+        required = bool(re.search(r"must (?:\w+\W+){0,3}(?:include|apply|maintain|insist)|mandatory|strict requirement|cannot (?:fix|offer fixed)", text))
+        if re.search(r"not mandatory|not required|do not require|need not (?:include|apply)", text):
+            required = False
+        series = next((s for s in sorted(families) if s.lower() in text and s in structured), None)
+        if series:
+            return series, required
+        return next((s for s in sorted(families) if s.lower() in text), None), False
+
+    def _fresh_final_trade(self, case, threads, sid, st, c_s, busy):
+        """One conditional give/get, with rounds to receive a reply and close.
+
+        Do not disturb RFQ coordination, an agreement, a better priced alternative or an
+        explicit playbook. A new price on a previously offered structure is not a new trade.
+        """
+        events = threads[sid]
+        if (st.get("final_trade_sent") or busy or len(live_threads(threads)) != 1
+                or moves_left(case, events) <= 2 or st.get("last_target") is None
+                or self.playbook.get(case["case_id"])):
+            return None
+        _, current = standing(events)
+        if not current or not eco.ok(case, current, st["std"]):
+            return None
+        primary_c = eco.standing_cost(case, current, st["std"])
+        if c_s < primary_c - 0.01:  # mirror the supplier's better alternative first
+            return None
+        text = latest(events).get("body", "").lower()
+        requested = set()
+        if CASH_RE.search(text): requested.add("payment_days")
+        if re.search(r"longer|extended|planning certainty", text): requested.add("contract_months")
+        if re.search(r"higher volume|larger volume", text): requested.add("volume_per_year")
+        if re.search(r"overtime|premium|expedited", text): requested.add("lead_time_days")
+        if re.search(r"ppm|quality|chargeback|complaint", text):
+            requested |= {"ppm_commitment", "chargeback_eur_per_complaint"}
+        series, required = self._index_preference(case, events)
+        if not series:
+            series, required = st.get("index_preference", (None, False))
+        if series: requested.add("index_clause")
+        requested &= set(eco.fields(case))
+        if not requested:
+            return None
+        # A visible late concession, retaining MIN_STEP of the remaining buyer gain.
+        target = c_s - MIN_STEP * max(c_s - st["last_target"], 0)
+        if target >= c_s - 0.01:
+            return None
+        previous = [{f: ts["terms"].get(f) for f in eco.fields(case)}
+                    for ev in events if ev.get("from") == "buyer"
+                    for ts in ev.get("term_sheets", [])]
+        previous += st.get("proposed_structures", [])
+        current = eco.closing_terms(case, current, st["std"])
+        candidates = []
+        for p, c, s in eco.priced_structures(case, target, st["std"], current, st.get("ask"), series, required):
+            if s in previous or p < 0.9 * current["unit_price"]:
+                continue
+            give = {f for f in ("contract_months", "volume_per_year", "lead_time_days", "ppm_commitment")
+                    if f in s and s[f] > current.get(f, s[f])}
+            give |= {f for f in ("payment_days", "chargeback_eur_per_complaint")
+                     if f in s and s[f] < current.get(f, s[f])}
+            clause, old_clause = s.get("index_clause"), current.get("index_clause")
+            if clause and (not old_clause or clause["deadband_pct"] < old_clause["deadband_pct"]):
+                give.add("index_clause")
+            if not give & requested or c >= c_s - 0.01:
+                continue
+            # A never-offered middle payment term is not fresh when faster payment was
+            # already proposed. Require a concession beyond the previous offered envelope.
+            fresh = set()
+            for f in give & requested:
+                values = [old[f] for old in previous if isinstance(old.get(f), (int, float))]
+                if f == "index_clause":
+                    bands = [old[f]["deadband_pct"] for old in previous if old.get(f)]
+                    if not bands or clause["deadband_pct"] < min(bands): fresh.add(f)
+                elif values:
+                    if f in ("payment_days", "chargeback_eur_per_complaint"):
+                        if s[f] < min(values): fresh.add(f)
+                    elif s[f] > max(values): fresh.add(f)
+                else:
+                    fresh.add(f)
+            if not fresh:
+                continue
+            value = eco.supplier_value(case, eco.sheet(case, s, p),
+                                       eco.supplier_estimate(st["std"], case["buyer"]["interest_rate"]))
+            candidates.append((value, p, c, s))
+        if not candidates:
+            return None
+        _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
+        return target, eco.sheet(case, structure, p)
 
     def _done(self, case, threads, sid, st, busy):
         """This thread has gone as far as it will. In an RFQ, keep it alive with a question while
@@ -325,7 +437,12 @@ class PegasusAgent:
     def _sheets(self, case, st, target):
         current = {k: v for k, v in eco.closing_terms(case, st.get("last_terms") or st["open"], st["std"]).items()
                    if k in eco.fields(case)}
-        picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"))
+        series, required = st.get("index_preference", (None, False))
+        adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
+        picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"),
+                                   adapt=adapt, index_series=series, require_index=required)
+        if adapt and not picks:
+            return []  # do not relax an observed requirement or exceed C through the legacy fallback
         if picks:
             out = []
             if st.get("cash") and "payment_days" in picks[0][1] and case.get("term_options", {}).get("payment_days"):
@@ -363,8 +480,11 @@ class PegasusAgent:
                 out.append(t)
         return out
 
-    def _message(self, case, threads, sid, st, target, k):
-        sheets = self._sheets(case, st, target)
+    def _message(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
+        preference = self._index_preference(case, threads[sid])
+        if preference[0]:
+            st["index_preference"] = preference
+        sheets = self._sheets(case, st, target) if sheets is None else sheets
         part = case["parts"][0]
         price = (standing(threads[sid])[1] or {}).get("unit_price") or st["open"].get("unit_price")
         rivals = []
@@ -387,6 +507,12 @@ class PegasusAgent:
             chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         lines += [c["sentence"] for c in chosen]
+        if not sheets:
+            lines.append("Could you confirm a feasible package using the allowed terms?")
+        if final_trade:
+            lines.append("Thank you for your final offer. We can make the attached additional commitment "
+                         "in exchange for the attached price. If no improvement is possible, "
+                         "please keep your current offer unchanged so we can close on it.")
         levers = [name for f, name in (("payment_days", "payment"), ("volume_per_year", "volume"),
                                        ("contract_months", "contract length"), ("effective_date", "timing"),
                                        ("chargeback_eur_per_complaint", "chargebacks"),
@@ -397,6 +523,9 @@ class PegasusAgent:
                          f"below around {', '.join(levers[:3])}.")
         if st.get("cash") and "payment_days" in case["negotiable"]:
             lines.append("We are happy to pay faster if that helps your cash flow, in exchange for a better price.")
+        elif st.get("cash") and case.get("fixed_terms", {}).get("payment_days") is not None:
+            lines.append(f"The enquiry fixes payment at {case['fixed_terms']['payment_days']} days net; "
+                         "the attached packages therefore trade only the negotiable terms.")
         if len(sheets) > 1:
             lines.append("Each of the attached packages works for us; please choose the one that suits you best.")
         # State the binding commitment the sheets carry - suppliers ask for it (P02: "Which volume
@@ -405,7 +534,14 @@ class PegasusAgent:
         fixed = case.get("fixed_terms", {})
         vol = main.get("volume_per_year") or fixed.get("volume_per_year") or case["buyer"]["need_per_year"]
         months = main.get("contract_months") or fixed.get("contract_months")
-        commit = f"We commit to a binding volume of {vol:,} pcs per year"
+        unit = "pcs"
+        metadata = self.intel.pkg() if getattr(self, "intel", None) else None
+        if metadata and part in metadata.ids:
+            unit = metadata.ids[part][1].get("uom") or unit
+            if unit == "pc": unit = "pcs"
+        if len(case["parts"]) > 1:
+            unit = "complete bundles of " + ", ".join(case["parts"])
+        commit = f"We commit to a binding volume of {vol:,} {unit} per year"
         lines.append(commit + (f" over {months} months." if months else "."))
         asked = (latest(threads[sid]).get("body") or "").lower()
         if re.search(r"lead ?time|lieferzeit|delivery date", asked) and "?" in asked:

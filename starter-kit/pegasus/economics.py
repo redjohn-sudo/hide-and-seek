@@ -117,8 +117,7 @@ def standing_cost(case, terms, std):
 
 
 def distance(case, structure, current):
-    """How far a structure is from the supplier's current terms, each field scaled by the range
-    of its options (0 = what it asks for)."""
+    """Claude's tie-break: distance to current terms, scaled by each option range."""
     if not current:
         return 0.0
     d = 0.0
@@ -127,17 +126,82 @@ def distance(case, structure, current):
         if cur is None or v == cur:
             continue
         opts = [o for o in case.get("term_options", {}).get(f, []) if isinstance(o, (int, float))]
-        if isinstance(v, (int, float)) and isinstance(cur, (int, float)) and len(opts) > 1:
-            d += abs(v - cur) / (max(opts) - min(opts))
+        span = max(opts) - min(opts) if opts else 0
+        if isinstance(v, (int, float)) and isinstance(cur, (int, float)) and span:
+            d += abs(v - cur) / span
         else:
             d += 1.0
     return d
 
 
-def best_for_target(case, target_c, std, current=None, ask=None, limit=3):
+def priced_structures(case, target_c, std, current=None, ask=None, index_series=None,
+                      require_index=False):
+    """Legal offers within C, including concessions across several fields.
+
+    A supplier's stated requirement is applied only to an allowed, structured index family.
+    No response, score, private reservation price or cost-breakdown floor enters this grid.
+    """
+    rows = []
+    for s in grid(case):
+        clause = s.get("index_clause")
+        months = (current or {}).get("contract_months")
+        long_term = not months or s.get("contract_months", months) >= months
+        if require_index and long_term and (not clause or clause.get("series") != index_series):
+            continue
+        p = price_for(case, s, target_c, std)
+        if ask:
+            p = min(p, ask)
+        t = sheet(case, s, p)
+        c = cost(case, t, std)
+        if p > 0.01 and ok(case, t, std) and c <= target_c + 0.01:
+            rows.append((p, c, s))
+    return sorted(rows, key=lambda r: (-r[0], distance(case, r[2], current), r[1]))
+
+
+def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
+                    adapt=False, index_series=None, require_index=False):
     """Structures that leave the supplier the highest price at our target C - the cheapest way
     for us to give it what it values most (price), whatever the supplier's own price is.
     Returns [(price, structure)], best first; alternatives vary a lever the others do not."""
+    if adapt:
+        candidates = priced_structures(case, target_c, std, current, ask, index_series, require_index)
+        if not candidates:
+            return []
+        main = candidates[0]
+        credible = [r for r in candidates[1:] if r[0] >= 0.9 * main[0]]
+        picks = [(main[0], main[2])]
+        # Prefer one complete supplier-friendly trade to a price-identical quality variant.
+        # The cash estimate uses the published buyer rate as a declared hypothesis, not C_best.
+        supplier = supplier_estimate(std, case["buyer"]["interest_rate"])
+        def preference(row):
+            p, c, s = row
+            return (supplier_value(case, sheet(case, s, p), supplier), s.get("ppm_commitment", 0), -c)
+        relevant = credible
+        if index_series:
+            relevant = [r for r in credible if (r[2].get("index_clause") or {}).get("series") == index_series]
+        elif {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(fields(case)):
+            relevant = [r for r in credible if r[2]["chargeback_eur_per_complaint"] < main[2]["chargeback_eur_per_complaint"]]
+        else:
+            relevant = []
+        if relevant and limit > 1:
+            r = max(relevant, key=preference)
+            picks.append((r[0], r[2]))
+            if not index_series and len(picks) < limit:
+                relaxed = max(relevant, key=lambda r: (r[2].get("ppm_commitment", 0),
+                              -r[2].get("chargeback_eur_per_complaint", 0), preference(r)))
+                if relaxed[2] not in [s for _, s in picks]:
+                    picks.append((relaxed[0], relaxed[2]))
+        varied = {f for _, s in picks[1:] for f in s if s[f] != main[2][f]}
+        for p, _, s in credible:
+            if len(picks) >= limit:
+                break
+            diff = {f for f in s if s[f] != main[2][f]}
+            if len(diff) == 1 and not diff & varied and s not in [x[1] for x in picks]:
+                # An earlier lead time at the same price adds no buyer value.
+                if diff == {"lead_time_days"} and p == main[0] and s["lead_time_days"] < main[2]["lead_time_days"]:
+                    continue
+                picks.append((p, s)); varied |= diff
+        return picks
     rows = []
     for s in grid(case):
         p = price_for(case, s, target_c, std)
@@ -146,8 +210,6 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3):
         t = sheet(case, s, p)
         if p > 0.01 and ok(case, t, std):
             rows.append((p, distance(case, s, current), s))
-    # at the same price for us, the structure closest to what the supplier asks for is a free gift
-    # to it (P11: ppm 1500 with a 500 EUR chargeback costs us what ppm 300 does; it opened at 6400)
     rows.sort(key=lambda r: (-round(r[0], 2), r[1]))
     if not rows:
         return []
