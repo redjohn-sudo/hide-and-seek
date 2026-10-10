@@ -115,9 +115,11 @@ class Claims:
                + self.forecast_claim(part) + self.scorecard_claim(supplier))
         return sorted(out, key=lambda c: -c["weight"])
 
-    def pick(self, supplier, part, price, drivers_text="", rivals=()):
-        """Up to three unused claims for the next message; marks their IDs as used."""
-        pool = [c for r in rivals for c in self.rival_claim(*r)] + self.candidates(supplier, part, price, drivers_text)
+    def pick(self, supplier, part, price, drivers_text="", rivals=(), rivals_only=False, limit=MAX_PER_MESSAGE):
+        """Up to `limit` unused claims for the next message; marks their IDs as used."""
+        pool = [c for r in rivals for c in self.rival_claim(*r)]
+        if not rivals_only:
+            pool += self.candidates(supplier, part, price, drivers_text)
         chosen = []
         for c in pool:
             key = tuple(c["refs"]) if c.get("rival") else None
@@ -129,6 +131,6 @@ class Claims:
                 self.used.add((supplier, key))
             else:
                 self.used |= ids
-            if len(chosen) >= MAX_PER_MESSAGE:
+            if len(chosen) >= limit:
                 break
         return chosen

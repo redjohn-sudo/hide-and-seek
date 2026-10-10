@@ -23,13 +23,15 @@ from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 from . import economics as eco
 from . import guard
 from .claims import Claims
+from .claims_intel import Claims as IntelClaims
+from .intel_bridge import Intelligence
 
 log = logging.getLogger("pegasus")
 
 # Tunables (environment, for the sandbox bench): structure ranking and opening anchor.
 RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
-ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.85"))      # share of the supplier's price
-PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.97"))     # price increase: share of current
+ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of the supplier's price
+PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
@@ -74,7 +76,13 @@ class PegasusAgent:
 
     # -- per case / per thread state ----------------------------------------------------------
     def _prepare(self, case):
-        self.case_id, self.claims, self.state = case["case_id"], Claims(case, self.pkg), {}
+        self.case_id, self.state = case["case_id"], {}
+        # Codex's dossier-based claims (all package suppliers, final included); ours as fallback
+        self.intel = getattr(self, "intel", None) or (Intelligence(self.pkg) if self.pkg else None)
+        self.claims = IntelClaims(case, self.pkg, self.intel) if self.intel else Claims(case, self.pkg)
+        self.fallback_claims = Claims(case, self.pkg)
+        if self.claims is not self.fallback_claims and hasattr(self.claims, "used"):
+            self.fallback_claims.used = self.claims.used  # one ledger: an ID is cited once per case
         self.c_alt = eco.alt_cost(case)
 
     def _thread(self, case, sid, events):
@@ -86,6 +94,15 @@ class PegasusAgent:
             open_terms = dict(sheets[0]["terms"]) if sheets else {}
             st = self.state[sid] = {"std": std, "open": open_terms, "offers": 0, "seen": [],
                                     "drivers": " ".join(m.get("body", "") for m in events if m.get("from") != "buyer")}
+            if getattr(self, "intel", None):
+                try:
+                    kinds = {x["type"] for x in self.intel.brief(case, sid).get("signals", [])}
+                except Exception as e:  # intelligence is a bonus, never a reason to fail a case
+                    log.warning("%s intel brief failed: %s", sid, e)
+                    kinds = set()
+                st["cash"] = "cash_sensitive" in kinds
+                st["freeze"] = "price_frozen" in kinds
+                st["signals"] = kinds
             st["anchor"] = self._anchor(case, sid, st)
         return st
 
@@ -277,7 +294,16 @@ class PegasusAgent:
             if oid and ot.get("unit_price") and price and ot["unit_price"] < price:
                 rivals.append((oid, ot["unit_price"]))
         rivals = sorted(rivals, key=lambda r: r[1])[:1]
-        chosen = self.claims.pick(sid, part, price, st["drivers"], rivals) if self.claims else []
+        # a rival's offer in our own words (sandbox D02: 0.723 vs 0.702 with the dossier wording),
+        # then the dossier's data claims, then ours as fallback - three at most
+        chosen = self.fallback_claims.pick(sid, part, price, rivals=rivals, rivals_only=True) if rivals else []
+        try:
+            if self.claims is not self.fallback_claims:
+                chosen += self.claims.pick(sid, part, price, st["drivers"])[: 3 - len(chosen)]
+        except Exception as e:
+            log.warning("%s intel claims failed: %s", sid, e)
+        if len(chosen) < 3:
+            chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         lines += [c["sentence"] for c in chosen]
         if st.get("freeze"):
