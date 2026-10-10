@@ -14,18 +14,26 @@ Per thread it
 """
 
 import logging
+import os
 import re
 
 from arena_kit.docs import quote_terms, standard_terms
 from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 
 from . import economics as eco
+from . import guard
 from .claims import Claims
 
 log = logging.getLogger("pegasus")
 
+# Tunables (environment, for the sandbox bench): structure ranking and opening anchor.
+RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
+ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.85"))      # share of the supplier's price
+PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.97"))     # price increase: share of current
+MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
-SCHEDULE = [0.0, 0.22, 0.38, 0.52, 0.63, 0.72, 0.80, 0.86, 0.90, 0.93]
+SCHEDULE = [float(x) for x in os.environ.get(
+    "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
 CASH_RE = re.compile(r"faster payment|cash|liquidit|zahlungsziel", re.I)
 FREEZE_RE = re.compile(r"frozen|freeze|cannot give up margin|no price reduction", re.I)
 
@@ -89,7 +97,7 @@ class PegasusAgent:
         """Opening target C: the playbook's target, else a firm price on the best structure."""
         b = case["buyer"]
         ref = self._ref_terms(case, st)
-        ranked = eco.structures(case, ref, st["std"])
+        ranked = eco.structures(case, ref, st["std"], indifferent=RANK_INDIFFERENT)
         st["ranked"] = ranked
         if not ranked:
             return None
@@ -100,9 +108,9 @@ class PegasusAgent:
             return target - 0.35 * max(c_open - target, 0)
         open_p = st["open"].get("unit_price") or best_p
         if case["type"] == "price_increase" and b.get("current_unit_price"):
-            p = min(open_p * 0.92, b["current_unit_price"] * 0.97)
+            p = min(open_p * 0.92, b["current_unit_price"] * PI_ANCHOR)
         else:
-            p = open_p * 0.85
+            p = open_p * ANCHOR_DROP
         return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
     # -- decision ------------------------------------------------------------------------------
@@ -154,34 +162,61 @@ class PegasusAgent:
                 st["anchor"] = min(st["anchor"] or c_s, c_s) - 0.5 * max(c_open - c_s, 0)
                 st["offers"] = 0
             else:
-                return self._accept_best(case, threads, prefer=sid, busy=busy)
+                return self._done(case, threads, sid, st, busy)
         if status == "final_offer" and not (self.push_after_final and not st.get("pushed")):
-            return self._accept_best(case, threads, prefer=sid, busy=busy)
+            return self._done(case, threads, sid, st, busy)
         if moves_left(case, events) <= 1:
-            return self._accept_best(case, threads, prefer=sid, busy=busy)
+            return self._done(case, threads, sid, st, busy)
         if (len(st["seen"]) >= 3 and st["offers"] >= 3 and st["seen"][-1] >= st["seen"][-2] - 1e-6
                 and st["seen"][-2] >= st["seen"][-3] - 1e-6):
-            return self._accept_best(case, threads, prefer=sid, busy=busy)  # it stopped moving
+            return self._done(case, threads, sid, st, busy)  # it stopped moving
         if status == "final_offer":
             st["pushed"] = True
 
         k = min(st["offers"], len(SCHEDULE) - 1)
         anchor = st["anchor"] if st["anchor"] is not None else c_s
         target = anchor + SCHEDULE[k] * max(c_s - anchor, 0)
+        prev = st.get("last_target")
+        if prev is not None and k > 0:
+            # suppliers answer "you only moved by one cent": every new offer moves visibly
+            step = max(MIN_STEP * (c_s - prev), 0)
+            target = max(target, min(prev + step, c_s))
         if target_c is not None:
             target = min(target, target_c) if moves_left(case, events) > 3 else target
         if target >= c_s * (1 - 1e-4):
-            return self._accept_best(case, threads, prefer=sid, busy=busy)
+            return self._done(case, threads, sid, st, busy)
         st["offers"] += 1
-        return {"supplier_id": sid, "message": self._message(case, threads, sid, st, target, k)}
+        st["last_target"] = target
+        msg = self._message(case, threads, sid, st, target, k)
+        alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
+        session_offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
+                          for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
+        msg, problems = guard.check(case, msg, self.pkg.facts if self.pkg else {}, session_offers,
+                                    ask=st.get("ask"), alt_price=alt.get("unit_price"))
+        for p in problems:
+            log.warning("%s %s guard: %s", case["case_id"], sid, p)
+        return {"supplier_id": sid, "message": msg}
+
+    def _done(self, case, threads, sid, st, busy):
+        """This thread has gone as far as it will. In an RFQ, keep it alive with a question while
+        another bidder is still moving (its offer is our best lever on them); close when no
+        thread can still improve."""
+        st["done"] = True
+        live = live_threads(threads)
+        still_moving = [s for s in live if s != sid and not (self.state.get(s) or {}).get("done")
+                        and moves_left(case, threads[s]) > 1]
+        if still_moving and moves_left(case, threads[sid]) > 2:
+            return {"supplier_id": sid, "message": {
+                "subject": f"Re: {case['title']}",
+                "body": "Thank you for your offer. We are completing our evaluation of all offers and "
+                        "will come back to you shortly. Could you confirm your earliest lead time?"}}
+        return self._accept_best(case, threads, prefer=sid, busy=busy)
 
     def _accept_best(self, case, threads, prefer=None, busy=()):
         """Accept the cheapest standing sheet over all live threads if it keeps the must-haves and
         beats the alternative; else walk away."""
         best = None
         for s in live_threads(threads):
-            if s in busy:  # a message is on its way there: its sheets may be stale by now
-                continue
             st = self.state.get(s) or {"std": standard_terms(threads[s])}
             for sid_sheet, terms in offered(threads[s]):
                 if not eco.ok(case, terms, st["std"]):
@@ -189,6 +224,10 @@ class PegasusAgent:
                 c = eco.standing_cost(case, terms, st["std"])
                 if best is None or c < best[0] - 1e-6 or (abs(c - best[0]) < 1e-6 and s == prefer):
                     best = (c, s, sid_sheet)
+        if best and best[1] in busy:
+            # the best sheet is on a thread whose reply is on its way: wait for it, do not take a
+            # dearer one meanwhile (and do not accept a sheet that may be stale)
+            return {"wait": True}
         if best and best[0] < self.c_alt:
             log.info("%s: accept %s at C=%.0f", case["case_id"], best[2], best[0])
             return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}

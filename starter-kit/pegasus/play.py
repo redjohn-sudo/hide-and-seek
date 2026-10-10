@@ -60,6 +60,13 @@ def play_case(table, case_id, agent, deadline=None):
                     decision = agent.decide(case, threads, sid, busy=inflight - {sid})
                 if decision is None:
                     return
+                waiting = bool(decision.get("wait"))
+            if waiting:
+                time.sleep(1.0)
+                continue
+            with lock:
+                if done.is_set():
+                    return
                 dsid, msg = decision["supplier_id"], decision["message"]
                 if msg.get("action"):
                     log.info("%s %s %s", case_id, dsid, msg["action"])
