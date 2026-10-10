@@ -58,7 +58,7 @@ def alt_cost(case):
 def price_for(case, structure, target_c, std=None, lo=0.01, hi=None):
     """Unit price at which `structure` costs `target_c` (C rises with the price)."""
     hi = hi or max(10 * (case["buyer"].get("fallback_unit_price") or 1), 1.0)
-    for _ in range(60):
+    for _ in range(40):
         mid = (lo + hi) / 2
         if cost(case, sheet(case, structure, mid), std) > target_c:
             hi = mid
@@ -114,3 +114,44 @@ def standing_cost(case, terms, std):
     if not terms or terms.get("unit_price") is None:
         return float("inf")
     return cost(case, closing_terms(case, terms, std), std)
+
+
+def best_for_target(case, target_c, std, current=None, ask=None, limit=3):
+    """Structures that leave the supplier the highest price at our target C - the cheapest way
+    for us to give it what it values most (price), whatever the supplier's own price is.
+    Returns [(price, structure)], best first; alternatives vary a lever the others do not."""
+    rows = []
+    for s in grid(case):
+        p = price_for(case, s, target_c, std)
+        if ask:
+            p = min(p, ask)
+        t = sheet(case, s, p)
+        if p > 0.01 and ok(case, t, std):
+            moved = sum(1 for f, v in s.items() if current and f in current and v != current[f])
+            rows.append((p, -moved, s))
+    rows.sort(key=lambda r: (-round(r[0], 2), -r[1]))
+    if not rows:
+        return []
+    main = rows[0][2]
+    picks, varied = [(rows[0][0], main)], set()
+    for p, _, s in rows[1:]:
+        if len(picks) >= limit:
+            break
+        diff = {f for f in s if s[f] != main[f]}
+        # an alternative must be a credible offer (no 12-month sheet at a fifth of the price)
+        if len(diff) == 1 and not diff & varied and p >= 0.9 * picks[0][0]:
+            picks.append((p, s))
+            varied |= diff
+    return picks
+
+
+def best_at_price(case, price, std):
+    """The structure that costs us least at a given price, and that C."""
+    best = None
+    for s in grid(case):
+        t = sheet(case, s, price)
+        if ok(case, t, std):
+            c = cost(case, t, std)
+            if best is None or c < best[0]:
+                best = (c, s)
+    return best

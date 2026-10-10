@@ -128,7 +128,10 @@ class PegasusAgent:
             p = min(open_p * 0.92, b["current_unit_price"] * PI_ANCHOR)
         else:
             p = open_p * ANCHOR_DROP
-        return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
+        # the structure is chosen at the price we will ask, not at the supplier's: at its price a
+        # short contract plus fallback can look cheaper (P08) while at ours full coverage wins
+        best = eco.best_at_price(case, p, st["std"])
+        return best[0] if best else eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
     # -- decision ------------------------------------------------------------------------------
     def decide(self, case, threads, sid=None, busy=()):
@@ -147,6 +150,7 @@ class PegasusAgent:
         c_s = min(offers) if offers else float("inf")
         if (terms or {}).get("unit_price"):
             st["ask"] = terms["unit_price"]
+            st["last_terms"] = terms
         if c_s == float("inf"):
             # nothing valid on the table (e.g. its quote breaks a must-have): concede towards what
             # our best structure would cost at its price, never towards infinity
@@ -257,6 +261,21 @@ class PegasusAgent:
 
     # -- the e-mail ----------------------------------------------------------------------------
     def _sheets(self, case, st, target):
+        current = {k: v for k, v in eco.closing_terms(case, st.get("last_terms") or st["open"], st["std"]).items()
+                   if k in eco.fields(case)}
+        picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"))
+        if picks:
+            out = []
+            if st.get("cash") and "payment_days" in picks[0][1] and case.get("term_options", {}).get("payment_days"):
+                quick = {**picks[0][1], "payment_days": min(case["term_options"]["payment_days"])}
+                if quick not in [s for _, s in picks]:
+                    picks = picks[:2] + [(None, quick)]
+            for p, s in picks[:3]:
+                price = p if p is not None else min(eco.price_for(case, s, target, st["std"]), st.get("ask") or 1e18)
+                t = eco.sheet(case, s, price)
+                if eco.ok(case, t, st["std"]) and t not in out:
+                    out.append(t)
+            return out
         ranked = st.get("ranked") or []
         if not ranked:
             return []
@@ -306,10 +325,15 @@ class PegasusAgent:
             chosen += self.fallback_claims.pick(sid, part, price, st["drivers"], limit=3 - len(chosen))
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         lines += [c["sentence"] for c in chosen]
-        if st.get("freeze"):
+        levers = [name for f, name in (("payment_days", "payment"), ("volume_per_year", "volume"),
+                                       ("contract_months", "contract length"), ("effective_date", "timing"),
+                                       ("chargeback_eur_per_complaint", "chargebacks"),
+                                       ("ppm_commitment", "quality commitment"), ("lead_time_days", "lead time"),
+                                       ("index_clause", "an index clause")) if f in case["negotiable"]]
+        if st.get("freeze") and levers:
             lines.append("We understand your position on list prices, so we have structured the packages "
-                         "below around payment, volume and contract length.")
-        if st.get("cash"):
+                         f"below around {', '.join(levers[:3])}.")
+        if st.get("cash") and "payment_days" in case["negotiable"]:
             lines.append("We are happy to pay faster if that helps your cash flow, in exchange for a better price.")
         if len(sheets) > 1:
             lines.append("Each of the attached packages works for us; please choose the one that suits you best.")
