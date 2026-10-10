@@ -120,6 +120,18 @@ def offered(events):
     return out
 
 
+def offered_ever(events):
+    """Every alternative the supplier listed in any of its messages (id, terms), oldest first."""
+    out = []
+    for m in events:
+        if m.get("from") == "buyer":
+            continue
+        for ts in (m.get("term_sheets") or [])[1:]:
+            if ts.get("term_sheet_id") and ts.get("terms"):
+                out.append((ts["term_sheet_id"], ts["terms"]))
+    return out
+
+
 def supplier_reference(case, events):
     """The supplier's own terms from its opening quote PDF: what it offered (except the price),
     its standard terms and the terms fixed by the enquiry; the buyer's plan fills any gap.
@@ -252,7 +264,11 @@ class PegasusAgent:
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
                                      self.pkg.facts if self.pkg else {}, sid)
             if sup:
-                st["std"]["_floor"] = sup  # floors our prices; counted in C only to decide acceptance
+                # every C the agent computes for this thread includes the relationship charge: targets,
+                # structures, packages, floors and acceptance all in the same units (Kimi M1; lot I P01:
+                # packages priced in plain C drifted to 45/60-day payment the model knew were dearer)
+                st["std"]["_floor"] = sup
+                st["std"]["_supplier"] = sup
                 log.info("%s %s: supplier full cost estimate %.2f, cost of money %.1f %%", case["case_id"], sid,
                          sup["full_cost"], 100 * sup["interest_rate"])
             st["anchor"] = self._anchor(case, sid, st)
@@ -421,7 +437,7 @@ class PegasusAgent:
         anchor = st["anchor"] if st["anchor"] is not None else c_s
         if c_s <= anchor + 1e-6 and sheet_id:
             # its standing offer already costs us no more than our opening demand: take it
-            return self._done(case, threads, sid, st, busy)
+            return self._done(case, threads, sid, st, busy, converged=True)
         target = anchor + SCHEDULE[k] * max(c_s - anchor, 0)
         if st.get("last_target") is not None:
             target = max(target, st["last_target"])  # concessions only go one way (P02/P01 lot E retreated)
@@ -452,7 +468,7 @@ class PegasusAgent:
         if target_c is not None:
             target = min(target, target_c) if moves_left(case, events) > 3 else target
         if target >= c_s * (1 - 1e-4):
-            return self._done(case, threads, sid, st, busy)
+            return self._done(case, threads, sid, st, busy, converged=True)
         st["offers"] += 1
         st["last_target"] = target
         return self._send(case, threads, sid, st, target, k, busy=busy)
@@ -491,7 +507,7 @@ class PegasusAgent:
             room = MESO_TOL * max(c_open - c_best, 0.0)
             kept = [ts for c, ts in kept if c <= c_best + room]
             series = (st.get("index_preference") or (None, False))[0]
-            if (series and len(kept) < 3 and st.get("ranked")
+            if (series and st.get("ranked")
                     and not any((ts["terms"].get("index_clause") or {}).get("series") == series for ts in kept)):
                 # It wants this clause (its cost drivers, its reply) and gives its best prices with it
                 # (P02: 355.93 with the CU clause, 367-372 without). Offer it once, on the structure
@@ -502,6 +518,8 @@ class PegasusAgent:
                 cands = eco.bottoms(case, with_clause, st["std"], hi) if with_clause else []
                 if cands and (c_s is None or cands[0][0] < c_s - 1e-6):
                     _, s, p = cands[0]
+                    if len(kept) >= 3:  # three packages at most: the clause replaces the last variant
+                        kept = kept[:2]
                     kept.append({"terms": eco.sheet(case, s, p)})
         msg["term_sheets"] = kept
         return msg
@@ -693,11 +711,13 @@ class PegasusAgent:
             return out
         return None
 
-    def _done(self, case, threads, sid, st, busy):
+    def _done(self, case, threads, sid, st, busy, converged=False):
         """This thread has gone as far as it will. In an RFQ, keep it alive with a question while
         another bidder is still moving (its offer is our best lever on them); close when no
-        thread can still improve."""
-        nudge = self._nudge(case, threads, sid, st, busy)
+        thread can still improve. `converged`: our schedule reached its price (the nudge applies);
+        on a stall or a stated floor it does not - a big step there told P11 "we are almost there"
+        and it closed 0.50 above the floor it reached when we kept to our schedule (0.794)."""
+        nudge = self._nudge(case, threads, sid, st, busy) if converged else None
         if nudge:
             return nudge
         st["done"] = True
@@ -728,6 +748,15 @@ class PegasusAgent:
                     continue
                 if best is None or c < best[0] - 1e-6 or (abs(c - best[0]) < 1e-6 and s == prefer):
                     best = (c, s, sid_sheet)
+            # every alternative it listed earlier stays a candidate to mirror: its final often drops
+            # the better variant (P18 lot I: 5.60/60 days/deadband 5 listed at round 2, final 5.60/90
+            # days/deadband 0 - mirrored after a final, such a variant came back "agreed": P18 f8069a19)
+            for sid_sheet, terms in offered_ever(threads[s]):
+                if sid_sheet in self.refused or sid_sheet in self.mirrored or not eco.ok(case, terms, st["std"]):
+                    continue
+                c = eco.standing_cost(case, terms, eco.with_relationship(st["std"]))
+                if alt_best is None or c < alt_best[0] - 1e-6:
+                    alt_best = (c, s, sid_sheet, terms)
         if alt_best and (best is None or alt_best[0] < best[0] - 1e-6):
             c, s, aid, terms = alt_best
             st = self.state.get(s) or {"std": standard_terms(threads[s])}
