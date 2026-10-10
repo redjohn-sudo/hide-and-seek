@@ -284,16 +284,25 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
     if not rows:
         return []
     main = rows[0][2]
-    picks, varied = [(rows[0][0], main)], set()
-    for p, _, s in rows[1:]:
-        if len(picks) >= limit:
-            break
-        diff = {f for f in s if s[f] != main[f]}
-        # an alternative must be a credible offer (no 12-month sheet at a fifth of the price)
-        if len(diff) == 1 and not diff & varied and p >= 0.9 * picks[0][0]:
-            picks.append((p, s))
-            varied |= diff
-    return picks
+    return [(rows[0][0], main)] + spread_alternatives(case, main, rows[0][0], [(p, s) for p, _, s in rows[1:]], current, limit - 1)
+
+
+def spread_alternatives(case, main, main_price, candidates, current=None, n=2):
+    """Up to `n` alternatives that each vary ONE lever of `main`, each lever once, choosing the
+    option FARTHEST from main (its standard payment term at a lower price, the longest term, ...):
+    the package the supplier picks then tells us what it values (MESO). Credible only: price
+    within 10 % of the main sheet."""
+    best = {}
+    for p, s in candidates:
+        diff = [f for f in s if s[f] != main[f]]
+        if len(diff) != 1 or p < 0.9 * main_price:
+            continue
+        f = diff[0]
+        d = distance(case, {f: s[f]}, {f: main[f]})
+        if f not in best or d > best[f][0]:
+            best[f] = (d, p, s)
+    out = sorted(best.values(), key=lambda x: -x[1])[:n]
+    return [(p, s) for _, p, s in out]
 
 
 def best_at_price(case, price, std, current=None):
