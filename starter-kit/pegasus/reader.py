@@ -129,6 +129,9 @@ def validate(sig, line, quote):
     """(accepted, value or None): a denied quote confirms no affirmative signal; a stated number
     must be on the cited line."""
     kind = sig.get("type")
+    quote = str(quote or "")
+    if not isinstance(kind, str):
+        return False, None
     if kind in AFFIRMATIVE and NEGATION.search(quote):
         return False, None
     if kind == "cost_floor" and re.search(r"\bno (?:absolute )?(?:limit|bottom)|\bnot (?:our |the )?(?:bottom line|absolute limit|limit)", quote, re.I):
@@ -140,7 +143,8 @@ def validate(sig, line, quote):
         except (TypeError, ValueError):
             return False, None
         unit = UNITS[VALUED[kind]]
-        near = re.compile(r"(?<![\d.,])" + re.escape(f"{v:g}") + r"(?![\d])\s*(?:%s)" % unit + "|" + r"(?:%s)\s*" % unit + re.escape(f"{v:g}") + r"(?![\d])", re.I)
+        num = re.escape(f"{v:g}") + r"(?!\d|[.,]\d)"  # 54 is not 54.5
+        near = re.compile(r"(?<![\d.,])" + num + r"\s*(?:%s)" % unit + "|" + r"(?:%s)\s*" % unit + num, re.I)
         if not near.search(line.replace("\u202f", " ")):
             return False, None  # the number is on the line but not with its unit (54 EUR is not 54 days)
         return True, v
@@ -210,6 +214,10 @@ def read(text):
     """Signal types stated in a supplier e-mail (with the numbers they carry): LLM with verified
     quotes, archived and replayed by fingerprint, else keywords."""
     found = Signals(keyword_signals(text))
+    if "chargeback_too_high" in found and re.search(
+            r"zero chargebacks?|no chargebacks?|(?:can't|cannot|do not|don't|won't) (?:accept|do|take|work with) (?:any )?chargebacks?",
+            (text or "").lower()):
+        found.values["chargeback_eur_per_complaint"] = 0.0  # it refuses them altogether
     if not ENABLED or not text:
         return found
     lines = _lines(text)
@@ -227,8 +235,8 @@ def read(text):
         if not isinstance(sig, dict):
             continue
         line = lines.get(str(sig.get("line", "")))
-        quote = " ".join((sig.get("quote") or "").split())
-        if not (sig.get("type") in TYPES and line and quote and quote.lower() in line.lower()):
+        quote = " ".join(str(sig.get("quote") or "").split())
+        if not (isinstance(sig.get("type"), str) and sig["type"] in TYPES and line and quote and quote.lower() in line.lower()):
             log.info("reader: rejected unverified %s", sig.get("type"))
             continue  # Contingency rule: the quote must be literally on that line
         ok, value = validate(sig, line, quote)

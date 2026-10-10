@@ -41,7 +41,8 @@ ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of th
 PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
 MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
 EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
-ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))  # keep the anchor structure within this share of the best price
+ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
+ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.97"))  # relationship cases: anchor >= this x floor  # keep the anchor structure within this share of the best price
 FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
 ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
@@ -262,9 +263,12 @@ class PegasusAgent:
         # gap to its ask): at its own price a short contract plus fallback looks cheaper (P08), at our
         # anchor a November start looks cheaper (P01) - neither is where we will sign
         expected = p + EXPECT * max(open_p - p, 0)
-        best = eco.best_at_price(case, expected, st["std"])
+        cur = {f: v for f, v in ref.items() if f in eco.fields(case)}
+        best = eco.best_at_price(case, expected, st["std"], cur)
         if best:
             st["anchor_structure"] = best[1]
+            if st["std"].get("_floor"):  # strategic supplier: never open far under its cost (P02 lot A scored 0)
+                p = max(p, ANCHOR_FLOOR * eco.price_floor(case, best[1], st["std"], max(10 * open_p, 1.0)))
             return eco.cost(case, eco.sheet(case, best[1], p), st["std"])
         return eco.cost(case, eco.sheet(case, best_s, p), st["std"])
 
@@ -388,7 +392,7 @@ class PegasusAgent:
             return self._done(case, threads, sid, st, busy)
         st["offers"] += 1
         st["last_target"] = target
-        return self._send(case, threads, sid, st, target, k)
+        return self._send(case, threads, sid, st, target, k, busy=busy)
 
     def _floored(self, case, st, msg):
         """Never offer under the price where the relationship charge outgrows the saving."""
@@ -402,12 +406,13 @@ class PegasusAgent:
                 t["unit_price"] = round(min(floor, st.get("ask") or floor), 2)
         return msg
 
-    def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
+    def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False, busy=()):
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
         now = [ts["terms"] for ts in msg.get("term_sheets") or []]
-        if now and now == st.get("last_sheets"):  # "your latest message repeats your previous figures" (P01)
-            for t in now:
-                t["unit_price"] = round(min(t["unit_price"] * 1.004, st.get("ask") or 1e18), 2)
+        if now and now == st.get("last_sheets"):
+            # every sheet is capped (floor or ask): repeating ourselves only irritates it - close
+            log.info("%s %s: sheets would repeat - closing", case["case_id"], sid)
+            return self._done(case, threads, sid, st, busy)
         st["last_sheets"] = [dict(t) for t in now]
         for ts in msg.get("term_sheets") or []:  # what we have offered so far (for `remaining_trade`)
             st.setdefault("proposed", []).append({f: v for f, v in ts["terms"].items() if f != "unit_price"})

@@ -296,10 +296,11 @@ def best_for_target(case, target_c, std, current=None, ask=None, limit=3,
     return picks
 
 
-def best_at_price(case, price, std):
+def best_at_price(case, price, std, current=None):
     """The structure that costs us least at a given price (never below the bottom of its U when
-    a relationship charge applies), and that C."""
-    best = None
+    a relationship charge applies), and that C; at equal cost (1 EUR) the one closest to the
+    supplier's own terms - a change it did not ask for is a change it may charge for."""
+    best, best_key = None, None
     for s in grid(case):
         p = price
         if (std or {}).get("_supplier"):
@@ -307,6 +308,7 @@ def best_at_price(case, price, std):
         t = sheet(case, s, p)
         if ok(case, t, std):
             c = cost(case, t, std)
-            if best is None or c < best[0]:
-                best = (c, s)
+            key = (round(c), distance(case, s, current) if current else 0.0)
+            if best is None or key < best_key:
+                best, best_key = (c, s), key
     return best
