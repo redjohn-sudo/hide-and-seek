@@ -352,7 +352,8 @@ class PegasusAgent:
         if out and isinstance(out.get("message"), dict) and not out["message"].get("action") and out["message"].get("body"):
             who = out.get("supplier_id")
             st = self.state.get(who)
-            if st and out["message"].get("term_sheets"):
+            exact = out["message"].pop("_exact", False)
+            if st and out["message"].get("term_sheets") and not exact:
                 self._floored(case, st, out["message"])  # the one exit point: no path sends a sheet under the floor
             n = sum(m.get("from") == "buyer" for m in threads.get(who, [])) + 1
             subj = out["message"].get("subject") or f"Re: {case['title']}"
@@ -428,6 +429,9 @@ class PegasusAgent:
             return self._accept_best(case, threads, prefer=sid, busy=busy)
         if status == "final_offer" and not st.get("final_seen"):
             st["final_seen"] = sum(1 for m in events if m.get("from") != "buyer") - 1
+        up = self._agreed_below_bottom(case, threads, sid, st, status, terms, busy)
+        if up:
+            return up
         probe = self._clause_probe(case, threads, sid, st, status, terms, busy)
         if probe:
             return probe
@@ -836,6 +840,30 @@ class PegasusAgent:
         t = eco.cost(case, eco.sheet(case, s0, round(p, 2)), st["std"])
         return min(max(t, prev), c_s)
 
+    def _agreed_below_bottom(self, case, threads, sid, st, status, terms, busy):
+        """It agreed to a price under the bottom of the U (strategic supplier): the relationship
+        charge makes that dearer for us than the bottom itself (P02 lot Q: agreed 352.95 / 90 days /
+        clause = 0.33, the same package at 361.21 = 0.735). Send the same package at the bottom price
+        - a higher price it cannot refuse - and take that."""
+        if not st["std"].get("_floor") or status != "agreed" or not terms or sid in busy:
+            return None
+        if st.get("raised_to_bottom") or moves_left(case, threads[sid]) <= 1:
+            return None
+        structure = {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items() if f in eco.fields(case)}
+        hi = max(10 * terms["unit_price"], 1.0)
+        pb = eco.price_floor(case, structure, st["std"], hi)
+        if terms["unit_price"] >= pb - 0.01:
+            return None
+        st["raised_to_bottom"] = True
+        sheet = eco.sheet(case, structure, pb)
+        log.info("%s %s: agreed %.2f is under the bottom %.2f - send the bottom", case["case_id"], sid, terms["unit_price"], pb)
+        return {"supplier_id": sid, "message": {
+            "subject": f"Re: {case['title']}", "_exact": True,
+            "body": ("Thank you for agreeing. We want a price that is sustainable for you over the whole term: please "
+                     f"confirm the attached package at {pb:.2f} EUR per unit and we place the order.\n\n"
+                     "Best regards\nHollerau Pumpenwerke GmbH, Purchasing"),
+            "term_sheets": [{"terms": sheet}]}}
+
     def _clause_probe(self, case, threads, sid, st, status, terms, busy):
         """It agreed to a package with the index clause it wanted (P02: 361.21 / 90 days / CU clause
         at once, 0.735 - the clause alone costs us 17.5 kEUR). Once, ask for the same package
@@ -891,6 +919,7 @@ class PegasusAgent:
         log.info("%s %s: agreed with a clause - probe without it at %.2f", case["case_id"], sid, sheet["unit_price"])
         return {"supplier_id": sid, "message": {
             "subject": f"Re: {case['title']}",
+            "_exact": True,
             "body": ("Thank you for agreeing. One question before we place the order: our controlling prefers a "
                      f"fixed price without the index clause. Could you confirm the attached fixed-price package at "
                      f"{sheet['unit_price']:.2f} EUR per unit? If not, your agreed offer stands for us.\n\n"
