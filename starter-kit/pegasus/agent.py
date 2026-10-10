@@ -57,6 +57,8 @@ TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
 # quote: facts as claims come back "irrelevant - does not concern this part or our company" (lot U: P08 0.67 -> 0.53,
 # P11 0.84 -> 0.76): off
+# quality notifications in the first message: lot V P08 0.67 -> 0.62, P10 0.70 -> 0.69 - off
+QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
@@ -1382,7 +1384,7 @@ class PegasusAgent:
                 st["order_claim_sent"] = True  # (the team filter drops po: claims; this one leads on purpose)
                 chosen = oc + chosen  # the order-history argument that moves distributors leads
                 self.fallback_claims.used |= set(oc[0]["refs"])
-        if k == 0 and len(chosen) < 3 and not st.get("quality_claim_sent"):
+        if QUALITY_CLAIM and k == 0 and len(chosen) < 3 and not st.get("quality_claim_sent"):
             try:
                 ql = self.fallback_claims.quality_claim(sid, part)
             except Exception:
