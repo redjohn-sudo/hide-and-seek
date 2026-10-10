@@ -870,6 +870,10 @@ class PegasusAgent:
         (mirroring it comes first)."""
         if not FINAL_ASK or sid in busy or moves_left(case, threads[sid]) <= 1:
             return None
+        if len(live_threads(threads)) < 2:
+            # a single supplier walks away on any further message after its final offer (lot S: P04,
+            # P10, P18 walked, P07 too - 0, 0, 0, 0.12): only RFQ bidders get questions
+            return None
         n = st.get("final_asks", 0)
         if n >= FINAL_ASK_MAX:
             return None
