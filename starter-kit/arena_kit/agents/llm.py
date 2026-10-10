@@ -74,14 +74,24 @@ def llm_from_env():
     base = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     headers = {"Authorization": f"Bearer {os.environ.get('LLM_API_KEY', '')}"}
 
+    # Reasoning models (e.g. DeepSeek on Nebius) can spend the provider's default token cap on
+    # thinking and return an empty answer: raise the cap and bound the reasoning effort.
+    extra = {"max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "16000"))}
+    if e := os.environ.get("LLM_REASONING_EFFORT"):
+        extra["reasoning_effort"] = e
+
     def complete(system, user):
         body = {
             "model": model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            **extra,
         }
         r = httpx.post(f"{base}/chat/completions", json=body, headers=headers, timeout=45.0)
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        choice = r.json()["choices"][0]
+        if choice.get("finish_reason") == "length":
+            log.warning("LLM hit max_tokens (%s) before answering", extra["max_tokens"])
+        return choice["message"]["content"] or ""
 
     return complete
 
