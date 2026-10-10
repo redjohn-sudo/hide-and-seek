@@ -99,7 +99,12 @@ def supplier_reference(case, events):
 class PegasusAgent:
     def __init__(self, package=None, playbook=None, push_after_final=False):
         self.pkg, self.playbook, self.push_after_final = package, playbook or {}, push_after_final
+        self.refused, self.mirrored = set(), set()  # sheet IDs the arena refused / we sent back
         self.case_id, self.claims, self.state = None, None, {}
+
+    def refuse(self, sheet_id):
+        """The arena refused to close on this sheet: never try it again."""
+        self.refused.add(sheet_id)
 
     # -- per case / per thread state ----------------------------------------------------------
     def _prepare(self, case):
@@ -273,15 +278,35 @@ class PegasusAgent:
     def _accept_best(self, case, threads, prefer=None, busy=()):
         """Accept the cheapest standing sheet over all live threads if it keeps the must-haves and
         beats the alternative; else walk away."""
-        best = None
+        best, alt_best = None, None
         for s in live_threads(threads):
             st = self.state.get(s) or {"std": standard_terms(threads[s])}
-            for sid_sheet, terms in offered(threads[s]):
-                if not eco.ok(case, terms, st["std"]):
+            for i, (sid_sheet, terms) in enumerate(offered(threads[s])):
+                if sid_sheet in self.refused or not eco.ok(case, terms, st["std"]):
                     continue
                 c = eco.standing_cost(case, terms, st["std"])
+                if i > 0:
+                    # an alternative ("offer:...-a") cannot be accepted - only the standing sheet can
+                    if alt_best is None or c < alt_best[0]:
+                        alt_best = (c, s, sid_sheet, terms)
+                    continue
                 if best is None or c < best[0] - 1e-6 or (abs(c - best[0]) < 1e-6 and s == prefer):
                     best = (c, s, sid_sheet)
+        if alt_best and (best is None or alt_best[0] < best[0] - 1e-6):
+            c, s, aid, terms = alt_best
+            st = self.state.get(s) or {"std": standard_terms(threads[s])}
+            if s not in busy and aid not in self.mirrored and moves_left(case, threads[s]) > 1:
+                # send its own alternative back as our sheet: it will answer "agreed" with a
+                # standing sheet we can accept (P10: offer:70410-1-a at 31.90 vs 33.80 standing)
+                self.mirrored.add(aid)
+                sheet = eco.sheet(case, {f: v for f, v in eco.closing_terms(case, terms, st["std"]).items()
+                                         if f in eco.fields(case)}, terms["unit_price"])
+                log.info("%s: mirror alternative %s", case["case_id"], aid)
+                return {"supplier_id": s, "message": {
+                    "subject": f"Re: {case['title']}",
+                    "body": "Thank you for your offer. We are ready to accept your alternative package "
+                            "as attached. Please confirm it.\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing",
+                    "term_sheets": [{"terms": sheet}]}}
         if best and best[1] in busy:
             # the best sheet is on a thread whose reply is on its way: wait for it, do not take a
             # dearer one meanwhile (and do not accept a sheet that may be stale)

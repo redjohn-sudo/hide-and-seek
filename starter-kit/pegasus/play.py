@@ -72,6 +72,8 @@ def play_case(table, case_id, agent, deadline=None):
                     log.info("%s %s %s", case_id, dsid, msg["action"])
                     if finish(dsid, msg):
                         return
+                    if hasattr(agent, "refuse") and msg["action"].get("term_sheet_id"):
+                        agent.refuse(msg["action"]["term_sheet_id"])
                     # refused (e.g. the sheet went stale): resync that thread from the arena
                     try:
                         fresh = table.client.thread(table.session_id, dsid)["messages"]
