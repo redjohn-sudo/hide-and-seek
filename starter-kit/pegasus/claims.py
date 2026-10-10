@@ -157,6 +157,20 @@ class Claims:
         return [{"refs": [k], "weight": 90, "rival": True,
                  "sentence": f"Another approved supplier quoted {v['unit_price']:.2f} EUR for this part ({k})."}]
 
+    def quality_claim(self, supplier, part):
+        """Quality notifications we raised against this supplier on this part in the last twelve
+        months (three or more): the latest three cited, with their count."""
+        if not self.pkg:
+            return []
+        rows = sorted((v.get("date") or "", k) for k, v in (getattr(self.pkg, "facts", None) or {}).items()
+                      if k.startswith("qn:") and isinstance(v, dict) and v.get("supplier") == supplier
+                      and v.get("part") == part and (v.get("date") or "") >= "2025-09")
+        if len(rows) < 3:
+            return []
+        ids = [k for _, k in rows[-3:]]
+        return [{"refs": ids, "weight": 25 + len(rows),
+                 "sentence": f"We had to raise repeated quality notifications on this part this year ({', '.join(ids)})."}]
+
     def rival_claim(self, rival_offer_id, price):
         return [{"refs": [rival_offer_id], "weight": 100, "rival": True,
                  "sentence": f"We hold a competing offer at {price:.2f} EUR per unit ({rival_offer_id})."}]
@@ -165,7 +179,8 @@ class Claims:
     def candidates(self, supplier, part, price, drivers_text=""):
         extra = DRIVER_RE.findall(drivers_text or "")
         out = (self.notice_claim() + self.index_claims(part, extra) + self.should_cost_claim(part, price)
-               + self.forecast_claim(part) + self.scorecard_claim(supplier) + self.order_claim(supplier, part, price))
+               + self.forecast_claim(part) + self.scorecard_claim(supplier) + self.order_claim(supplier, part, price)
+               + self.quality_claim(supplier, part))
         return sorted(out, key=lambda c: -c["weight"])
 
     def pick(self, supplier, part, price, drivers_text="", rivals=(), rivals_only=False, limit=MAX_PER_MESSAGE):

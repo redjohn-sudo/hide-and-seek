@@ -1382,6 +1382,14 @@ class PegasusAgent:
                 st["order_claim_sent"] = True  # (the team filter drops po: claims; this one leads on purpose)
                 chosen = oc + chosen  # the order-history argument that moves distributors leads
                 self.fallback_claims.used |= set(oc[0]["refs"])
+        if k == 0 and len(chosen) < 3 and not st.get("quality_claim_sent"):
+            try:
+                ql = self.fallback_claims.quality_claim(sid, part)
+            except Exception:
+                ql = []
+            if ql and not any(set(c["refs"]) & set(ql[0]["refs"]) for c in chosen):
+                st["quality_claim_sent"] = True
+                chosen = chosen + ql  # our quality notifications on this part fill a free slot
         lines = ["Dear Sir or Madam,", "", f"thank you for your offer regarding {case['title'].lower()}."]
         prev_their = st["seen"][-2] if len(st["seen"]) >= 2 else None
         if WARM and prev_their is not None and st["seen"][-1] < prev_their:
