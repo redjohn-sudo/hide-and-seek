@@ -55,6 +55,7 @@ MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one pa
 NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
 TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
 CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # one sheetless question after its final offer
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
 HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
 STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
@@ -457,6 +458,9 @@ class PegasusAgent:
                 st["last_target"] = target
                 return self._send(case, threads, sid, st, target, st["offers"] - 1,
                                   sheets=[sheet], final_trade=True)
+            ask = self._ask_after_final(case, threads, sid, st, busy)
+            if ask:
+                return ask
             return self._done(case, threads, sid, st, busy)
         if moves_left(case, events) <= 1:
             return self._done(case, threads, sid, st, busy)
@@ -839,6 +843,28 @@ class PegasusAgent:
             return target
         t = eco.cost(case, eco.sheet(case, s0, round(p, 2)), st["std"])
         return min(max(t, prev), c_s)
+
+    def _ask_after_final(self, case, threads, sid, st, busy):
+        """Use the rounds left after its final offer: once, a question without any sheet - no counter,
+        so nothing to walk away from - asking it to check once more. An RFQ bidder lowered its final
+        that way (P05 lot K: 30.00 -> 28.50); it never walked on a question. Skipped when one of its
+        own alternatives is better for us (mirroring it comes first) or when few rounds remain."""
+        if not FINAL_ASK or st.get("final_asked") or sid in busy or moves_left(case, threads[sid]) <= 2:
+            return None
+        events = threads[sid]
+        sheet_id, terms = standing(events)
+        rel = eco.with_relationship(st["std"])
+        c_std = eco.standing_cost(case, terms, rel) if terms else float("inf")
+        if any(eco.ok(case, t, st["std"]) and eco.standing_cost(case, t, rel) < c_std - 1e-6
+               for _, t in offered_ever(events) if _ not in self.mirrored):
+            return None
+        st["final_asked"] = True
+        log.info("%s %s: one question after its final offer", case["case_id"], sid)
+        return {"supplier_id": sid, "message": {
+            "subject": f"Re: {case['title']}",
+            "body": ("Thank you for your final offer. We are close to placing the order. Before we sign, could you "
+                     "check once more with your management whether this is truly the best price you can give us "
+                     "on these terms, for a firm order today?\n\nBest regards\nHollerau Pumpenwerke GmbH, Purchasing")}}
 
     def _agreed_below_bottom(self, case, threads, sid, st, status, terms, busy):
         """It agreed to a price under the bottom of the U (strategic supplier): the relationship
