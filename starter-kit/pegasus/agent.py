@@ -36,8 +36,35 @@ MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
     "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
+# Off by default: on the sandbox (D02) walking up from the direct cost scored 0.534 vs 0.702.
+USE_FLOOR = os.environ.get("PEGASUS_FLOOR", "0") == "1"
+FLOOR_MARGIN = float(os.environ.get("PEGASUS_FLOOR_MARGIN", "0.015"))  # over direct cost
+FLOOR_STEP = float(os.environ.get("PEGASUS_FLOOR_STEP", "0.008"))      # per offer once known
+OVERHEAD_RE = re.compile(r"overhead|profit|margin|gewinn|marge", re.I)
 CASH_RE = re.compile(r"faster payment|cash|liquidit|zahlungsziel", re.I)
 FREEZE_RE = re.compile(r"frozen|freeze|cannot give up margin|no price reduction", re.I)
+
+
+def direct_cost(events):
+    """Direct cost per unit from the latest cost breakdown a supplier attached: the sum of its
+    elements except overhead and profit. In the sandbox the best price the supplier would accept
+    sits about 2 % above it (D02: 12.76 direct, C_best at 13.06)."""
+    for msg in reversed(events):
+        for att in msg.get("attachments") or []:
+            if "cost" not in att.get("name", "").lower() or not att.get("text"):
+                continue
+            total, n = 0.0, 0
+            for line in att["text"].splitlines():
+                cells = [c.strip() for c in line.split("|")]
+                if len(cells) < 2 or cells[0].lower() in ("element", "unit price") or OVERHEAD_RE.search(cells[0]):
+                    continue
+                try:
+                    total += float(cells[1]); n += 1
+                except ValueError:
+                    continue
+            if n:
+                return total
+    return None
 
 
 def offered(events):
@@ -197,8 +224,18 @@ class PegasusAgent:
         k = min(st["offers"], len(SCHEDULE) - 1)
         anchor = st["anchor"] if st["anchor"] is not None else c_s
         target = anchor + SCHEDULE[k] * max(c_s - anchor, 0)
+        dc = direct_cost(events) if USE_FLOOR else None
+        if dc and not st.get("floor_price"):
+            st["floor_price"], st["floor_at"] = dc * (1 + FLOOR_MARGIN), st["offers"]
+            log.info("%s %s: cost breakdown, direct cost %.2f", case["case_id"], sid, dc)
+        if st.get("floor_price") and moves_left(case, events) > 2:
+            # we know its cost: walk up from just above it, slowly, instead of splitting the gap
+            p = st["floor_price"] * (1 + FLOOR_STEP * (st["offers"] - st["floor_at"]))
+            best = eco.best_at_price(case, p, st["std"])
+            if best:
+                target = min(target, best[0])
         prev = st.get("last_target")
-        if prev is not None and k > 0:
+        if prev is not None and k > 0 and not st.get("floor_price"):
             # suppliers answer "you only moved by one cent": every new offer moves visibly
             step = max(MIN_STEP * (c_s - prev), 0)
             target = max(target, min(prev + step, c_s))
