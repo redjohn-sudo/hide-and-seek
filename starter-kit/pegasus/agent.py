@@ -21,7 +21,7 @@ from arena_kit.docs import quote_terms, standard_terms
 from arena_kit.play import ENDED, latest, live_threads, moves_left, standing
 
 from . import economics as eco
-from . import guard
+from . import guard, prose, reader
 from .claims import Claims
 from .claims_intel import Claims as IntelClaims
 from .intel_bridge import Intelligence
@@ -264,6 +264,12 @@ class PegasusAgent:
             st["cash"] = True
         if FREEZE_RE.search(text):
             st["freeze"] = True
+        # read what the supplier said into signals once per reply (LLM with verified quotes, else keywords)
+        key = (len(events), text[:80])
+        if text and st.get("read_key") != key:
+            st["read_key"] = key
+            st["last_signals"] = reader.read(text)
+            reader.apply(st, st["last_signals"])
 
         target_c = (self.playbook.get(case["case_id"]) or {}).get("target_c")
         good_enough = target_c is not None and c_s <= target_c + 1e-6 + 0.004 * max(
@@ -345,6 +351,22 @@ class PegasusAgent:
 
     def _send(self, case, threads, sid, st, target, k, sheets=None, final_trade=False):
         msg = self._floored(case, st, self._message(case, threads, sid, st, target, k, sheets, final_trade))
+        if prose.ENABLED and msg.get("body"):
+            lines = msg["body"].split("\n")
+            args = [l for l in lines if re.search(r"\b(?:idx|quote|offer|sc|qn|po|cost|fc|news|doc|ctr):", l)]
+            extra = [l for l in lines if l and l not in args and not l.startswith(("Dear", "Best regards", "Hollerau"))]
+            body = prose.narrate(latest(threads[sid]).get("body", ""), msg["body"], args, extra)
+            if body:
+                candidate = {**msg, "body": body}
+                alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
+                offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
+                          for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
+                checked, problems = guard.check(case, candidate, self.pkg.facts if self.pkg else {}, offers,
+                                                ask=st.get("ask"), alt_price=alt.get("unit_price"))
+                if not problems:
+                    msg = checked
+                else:
+                    log.warning("%s %s prose rejected by the guard: %s", case["case_id"], sid, problems[:2])
         alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
         session_offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
                           for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
