@@ -1365,6 +1365,13 @@ class PegasusAgent:
                 qc = self.fallback_claims.own_quote_claim(sid, part, price)
             except Exception:
                 qc = []
+            try:
+                rq = self.fallback_claims.rival_quote_claim(sid, part, price)
+            except Exception:
+                rq = []
+            if rq and not st.get("rival_quote_sent") and not any(set(c["refs"]) == set(rq[0]["refs"]) for c in chosen):
+                st["rival_quote_sent"] = True
+                chosen = rq + chosen  # a rival's recent quotation for the same part leads
             if qc and not st.get("quote_claim_sent") and not any(set(c["refs"]) == set(qc[0]["refs"]) for c in chosen):
                 st["quote_claim_sent"] = True
                 chosen = qc + chosen  # its own earlier quotation leads

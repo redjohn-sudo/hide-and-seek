@@ -141,6 +141,22 @@ class Claims:
         return [{"refs": [k], "weight": 80,
                  "sentence": f"Your own quotation for this part offered {v['unit_price']:.2f} EUR ({k})."}]
 
+    def rival_quote_claim(self, supplier, part, price):
+        """Another approved supplier's recent quotation for the same part, clearly under this one's ask
+        (P18: the other bar supplier quoted 5.45 on 2026-09-10 against an ask of 6.10)."""
+        if not self.pkg or not price:
+            return []
+        rows = [(k, v) for k, v in (getattr(self.pkg, "facts", None) or {}).items() if k.startswith("quote:")
+                and isinstance(v, dict) and v.get("supplier") not in (None, supplier) and v.get("part") == part
+                and v.get("unit_price") and v.get("price_unit", 1) == 1 and (v.get("date") or "") >= "2026-01"]
+        if not rows:
+            return []
+        k, v = min(rows, key=lambda kv: kv[1]["unit_price"])
+        if v["unit_price"] >= 0.97 * price:
+            return []
+        return [{"refs": [k], "weight": 90, "rival": True,
+                 "sentence": f"Another approved supplier quoted {v['unit_price']:.2f} EUR for this part ({k})."}]
+
     def rival_claim(self, rival_offer_id, price):
         return [{"refs": [rival_offer_id], "weight": 100, "rival": True,
                  "sentence": f"We hold a competing offer at {price:.2f} EUR per unit ({rival_offer_id})."}]
