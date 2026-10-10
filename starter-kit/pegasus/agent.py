@@ -44,6 +44,10 @@ GAP_LINE = os.environ.get("PEGASUS_GAP", "0") == "1"           # RFQ: tell each 
 NONCE = os.environ.get("PEGASUS_NONCE", "")  # bench only: a run tag in the subject defeats the reply cache
 TFT = float(os.environ.get("PEGASUS_TFT", "0"))          # >0: reciprocal steps (x supplier's last move)
 MIN_TFT = float(os.environ.get("PEGASUS_MIN_TFT", "0.05"))  # plus this share of the gap, so we always move
+# Three independent experiments; setting all three to 0 reproduces r9.
+CAPACITY_ANCHOR = float(os.environ.get("PEGASUS_CAPACITY_ANCHOR", "0.94"))
+APPROVAL_REVIEW = os.environ.get("PEGASUS_APPROVAL_REVIEW", "1") == "1"
+RFQ_BAFO = os.environ.get("PEGASUS_RFQ_BAFO", "1") == "1"
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
     "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
@@ -54,6 +58,7 @@ FLOOR_STEP = float(os.environ.get("PEGASUS_FLOOR_STEP", "0.008"))      # per off
 OVERHEAD_RE = re.compile(r"overhead|profit|margin|gewinn|marge", re.I)
 CASH_RE = re.compile(r"faster payment|cash|liquidit|zahlungsziel", re.I)
 FREEZE_RE = re.compile(r"frozen|freeze|cannot give up margin|no price reduction", re.I)
+INTERNAL_RE = re.compile(r"clarify.{0,30}internally|reviewed internally|approval|corporate policy|company policy", re.I)
 
 
 def direct_cost(events):
@@ -211,6 +216,16 @@ class PegasusAgent:
             p = min(open_p * 0.92, b["current_unit_price"] * PI_ANCHOR)
         else:
             p = open_p * ANCHOR_DROP
+        # Asking simultaneously for more capacity and earlier delivery calls for a credible
+        # first price. The public opening identifies both constraints; no supplier ID is used.
+        volume = st["open"].get("volume_per_year")
+        lead = st["open"].get("lead_time_days") or st["std"].get("lead_time_days")
+        if (CAPACITY_ANCHOR > 0 and b.get("category_goal") == "secure_supply"
+                and {"volume_per_year", "lead_time_days"} <= set(eco.fields(case))
+                and volume and b["need_per_year"] > volume
+                and lead and lead > b["need_lead_time_days"]):
+            st["capacity_pressure"] = True
+            p = max(p, open_p * min(CAPACITY_ANCHOR, 1.0))
         # the structure is chosen at the price we will ask, not at the supplier's: at its price a
         # short contract plus fallback can look cheaper (P08) while at ours full coverage wins
         best = eco.best_at_price(case, p, st["std"])
@@ -518,6 +533,27 @@ class PegasusAgent:
         adapt = bool(series) or {"ppm_commitment", "chargeback_eur_per_complaint"} <= set(eco.fields(case))
         picks = eco.best_for_target(case, target, st["std"], current, st.get("ask"),
                                    adapt=adapt, index_series=series, require_index=required)
+        if st.get("capacity_pressure") and picks:
+            # Replace a cost-identical rush duplicate with a priced, feasible standard-lead
+            # alternative. Keep the main package and the contract-length trade intact.
+            main_p, main = picks[0]
+            relaxed = eco.sheet(case, {**main, "lead_time_days": st["std"]["lead_time_days"]}, main_p)
+            structure = {f: relaxed[f] for f in eco.fields(case)}
+            price = min(eco.price_for(case, structure, target, st["std"]), st.get("ask") or 1e18)
+            price = max(price, eco.price_floor(case, structure, st["std"], max(10 * price, 1.0)))
+            relaxed = eco.sheet(case, structure, price)
+            duplicate = next((i for i, (p, s) in enumerate(picks[1:], 1)
+                if p == main_p and s.get("lead_time_days", 0) < main.get("lead_time_days", 0)
+                and all(v == main.get(f) for f, v in s.items() if f != "lead_time_days")), None)
+            if (relaxed["lead_time_days"] > main.get("lead_time_days", 0)
+                    and price >= .9 * main_p and price <= (st.get("ask") or 1e18)
+                    and eco.ok(case, relaxed, st["std"])
+                    and eco.cost(case, relaxed, st["std"]) <= target + .01
+                    and structure not in [s for _, s in picks]):
+                if duplicate is not None:
+                    picks[duplicate] = (price, structure)
+                elif len(picks) < 3:
+                    picks.append((price, structure))
         if adapt and not picks:
             return []  # do not relax an observed requirement or exceed C through the legacy fallback
         if picks:
@@ -652,6 +688,28 @@ class PegasusAgent:
             lines.append(f"Our required lead time is {case['buyer']['need_lead_time_days']} days.")
         if k == 0:
             lines.append("Could you send us a cost breakdown for this part?")
+        # Escalate on the current counter, before a final offer; no extra round is consumed.
+        if (APPROVAL_REVIEW and sheets and not st.get("approval_requested")
+                and latest(threads[sid]).get("status") == "open" and st["offers"] <= 2
+                and moves_left(case, threads[sid]) > 2 and INTERNAL_RE.search(asked)):
+            lines.append("Could your commercial manager review and approve your best price on the "
+                         "attached terms, including our stated binding volume commitment?")
+            st["approval_requested"] = True
+        # A single BAFO on an existing counter, with a live, feasible rival quote. Agreed and
+        # final offers are left alone, including the cheapest RFQ bid we already hold.
+        viable_rival = RFQ_BAFO and any(other != sid and other in live_threads(threads)
+            and standing(threads[other])[0]
+            and (standing(threads[other])[1].get("unit_price") or 0) > 0
+            and eco.ok(case, standing(threads[other])[1],
+                (self.state.get(other) or {}).get("std") or supplier_reference(case, threads[other]))
+            for other in threads)
+        if (RFQ_BAFO and sheets and viable_rival and not st.get("bafo_requested")
+                and latest(threads[sid]).get("status") == "open" and st["offers"] == 2
+                and moves_left(case, threads[sid]) > 2):
+            lines.append("We are comparing the live quotations for this enquiry. Please submit your "
+                         "best and final terms on the attached packages and keep your current "
+                         "quotation available until our award decision.")
+            st["bafo_requested"] = True
         lines += ["We value our cooperation.", "",
                   "Best regards", "Hollerau Pumpenwerke GmbH, Purchasing"]
         refs = [r for c in chosen for r in c["refs"]]
