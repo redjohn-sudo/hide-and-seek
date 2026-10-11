@@ -62,6 +62,8 @@ QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+FIRM_JUMP = os.environ.get("PEGASUS_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
+FIRM_DROP = float(os.environ.get("PEGASUS_FIRM_DROP", "0.032"))
 LATE_TRADE = os.environ.get("PEGASUS_LATE_TRADE", "0") == "1"  # experiment: needed lead time asked late, small premium
 LATE_SHARE = float(os.environ.get("PEGASUS_LATE_SHARE", "0.45"))
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
@@ -524,6 +526,8 @@ class PegasusAgent:
         target = self._paced(case, threads, sid, st, target, c_s)
         target = self._before_final(case, threads, sid, st, target, c_s)
         late = self._late_trade(case, threads, sid, st, target) if st.get("jumped") and not st.get("late_traded") else None
+        if not late and FIRM_JUMP and st.get("jumped") and not st.get("late_traded"):
+            late = self._firm_jump(case, threads, sid, st)
         if late:
             st["late_traded"] = True
             st["offers"] += 1
@@ -822,6 +826,28 @@ class PegasusAgent:
             return None
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
+
+    def _firm_jump(self, case, threads, sid, st):
+        """Experiment (PEGASUS_FIRM_JUMP=1): our last offer before its usual final is ONE package -
+        its own terms on the longest contract it accepts, FIRM_DROP under its standing price - with a
+        firm order and a request for its management's approval. Its concessions are tied to the
+        commitment ("authorized an adjustment ... for this extended commitment ... for the specified
+        volume and duration", P10). It agrees, or it closes where it would have anyway."""
+        sheet_id, terms = standing(threads[sid])
+        if not terms or not terms.get("unit_price"):
+            return None
+        cur = eco.closing_terms(case, terms, st["std"])
+        structure = {f: cur[f] for f in eco.fields(case) if f != "unit_price"}
+        months = ((case.get("term_options") or {}).get("contract_months") or [])
+        if "contract_months" in structure and months:
+            structure["contract_months"] = max(months)
+        sheet = eco.sheet(case, structure, round(terms["unit_price"] * (1 - FIRM_DROP), 2))
+        if not eco.ok(case, sheet, st["std"]):
+            return None
+        st["firm_jump"] = True
+        log.info("%s %s: firm jump - one package at %.2f (%s months)", case["case_id"], sid, sheet["unit_price"],
+                 structure.get("contract_months"))
+        return [sheet]
 
     def _late_trade(self, case, threads, sid, st, target):
         """Experiment (PEGASUS_LATE_TRADE=1): in our last offer before its usual final, once its price
@@ -1585,6 +1611,10 @@ class PegasusAgent:
             lines.append("You mention your volume discount tiers: which volume or contract term qualifies for "
                          "your next tier? We are ready to commit to it in the attached packages.")
         # Escalate on the current counter, before a final offer; no extra round is consumed.
+        if st.get("firm_jump") and not st.get("firm_said"):
+            st["firm_said"] = True
+            lines.append("We are ready to sign today: a firm order on the attached terms, with the longest commitment "
+                         "you offer. Could your management approve this price for that commitment?")
         if (APPROVAL_REVIEW and sheets and not st.get("approval_requested")
                 and latest(threads[sid]).get("status") == "open" and st["offers"] <= 2
                 and moves_left(case, threads[sid]) > 2 and INTERNAL_RE.search(asked)):
