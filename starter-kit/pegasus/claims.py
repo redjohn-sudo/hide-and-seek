@@ -171,6 +171,26 @@ class Claims:
         return [{"refs": ids, "weight": 25 + len(rows),
                  "sentence": f"We had to raise repeated quality notifications on this part this year ({', '.join(ids)})."}]
 
+    def contract_lead_claim(self, supplier, offered_lead, today="2026-10"):
+        """Our running contract with this supplier fixes a shorter delivery time than it now offers
+        (P10: 42 days in clause ctr:4600070410#5.1, valid to 2027-06-30, against 54-56 days asked -
+        its own letter admits 'lead times are currently longer than agreed')."""
+        if not self.pkg or not offered_lead:
+            return []
+        facts = getattr(self.pkg, "facts", None) or {}
+        for k, v in facts.items():
+            if not (k.startswith("ctr:") and "#" not in k and isinstance(v, dict) and v.get("supplier") == supplier):
+                continue
+            if (v.get("valid_to") or "") < today:
+                continue
+            for k2, v2 in facts.items():
+                if (k2.startswith(k + "#") and isinstance(v2, dict) and v2.get("type") == "delivery"
+                        and v2.get("days") and v2["days"] < offered_lead):
+                    return [{"refs": [k, k2], "weight": 95, "contract_lead": v2["days"],
+                             "sentence": (f"Our running contract {k} is valid until {v['valid_to']} and fixes "
+                                          f"delivery at {v2['days']} days ({k2}).")}]
+        return []
+
     def rival_claim(self, rival_offer_id, price):
         return [{"refs": [rival_offer_id], "weight": 100, "rival": True,
                  "sentence": f"We hold a competing offer at {price:.2f} EUR per unit ({rival_offer_id})."}]

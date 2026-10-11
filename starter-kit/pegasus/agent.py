@@ -62,6 +62,7 @@ QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+CONTRACT_LEAD = os.environ.get("PEGASUS_CONTRACT_LEAD", "0") == "1"  # experiment: cite the contract's delivery clause
 FIRM_JUMP = os.environ.get("PEGASUS_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
 FIRM_DROP = float(os.environ.get("PEGASUS_FIRM_DROP", "0.032"))
 LATE_TRADE = os.environ.get("PEGASUS_LATE_TRADE", "0") == "1"  # experiment: needed lead time asked late, small premium
@@ -287,6 +288,18 @@ class PegasusAgent:
                 st.setdefault("stated", {}).update(stated)
                 log.info("%s %s: remembered %s %s", case["case_id"], sid, sorted(flags), stated)
             st["final_round"] = memory.final_round(sid)
+            if CONTRACT_LEAD:
+                try:
+                    lead_offered = (eco.closing_terms(case, st["open"], st["std"]) or {}).get("lead_time_days")
+                    cc = self.fallback_claims.contract_lead_claim(sid, lead_offered)
+                except Exception:
+                    cc = []
+                if cc:
+                    # the contract's delivery time is the term, not a request: packages at that lead time
+                    # from the first message, the clause cited with them
+                    st["contract_lead"] = cc[0]["contract_lead"]
+                    st["lead_firm"] = False
+                    st.setdefault("stated", {}).pop("lead_time_days", None)
             sup = eco.supplier_model(case, st["std"], st["open"].get("unit_price"),
                                      self.pkg.facts if self.pkg else {}, sid)
             if sup:
@@ -1462,6 +1475,18 @@ class PegasusAgent:
                 qc = self.fallback_claims.own_quote_claim(sid, part, price)
             except Exception:
                 qc = []
+            if CONTRACT_LEAD:
+                try:
+                    lead_offered = (eco.closing_terms(case, st["open"], st["std"]) or {}).get("lead_time_days")
+                    cc = self.fallback_claims.contract_lead_claim(sid, lead_offered)
+                except Exception:
+                    cc = []
+                if cc and not st.get("contract_claim_sent") and not any(set(c["refs"]) & set(cc[0]["refs"]) for c in chosen):
+                    st["contract_claim_sent"] = True
+                    st["contract_lead"] = cc[0]["contract_lead"]
+                    st["lead_firm"] = False  # the contractual lead time is not a request, it is the contract
+                    chosen = cc + chosen
+                    self.fallback_claims.used |= set(cc[0]["refs"])
             try:
                 rq = self.fallback_claims.rival_quote_claim(sid, part, price)
             except Exception:

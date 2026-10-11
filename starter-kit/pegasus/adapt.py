@@ -18,7 +18,7 @@ FLAGS = ("wants_index", "cb_too_high", "lead_firm", "wants_duration", "wants_vol
 
 
 def active(st):
-    return any(st.get(k) for k in FLAGS)
+    return any(st.get(k) for k in FLAGS) or bool(st.get("contract_lead"))
 
 
 def index_series(case, st):
@@ -38,6 +38,8 @@ def allowed(case, st, s, current):
         cur = st.get("stated", {}).get("chargeback_eur_per_complaint", (current or {}).get("chargeback_eur_per_complaint"))
         if cur is not None and (s["chargeback_eur_per_complaint"] > 0 if cur <= 0 else s["chargeback_eur_per_complaint"] >= cur):
             return False
+    if st.get("contract_lead") and "lead_time_days" in s and s["lead_time_days"] < st["contract_lead"]:
+        return False  # shorter than the contract: a request it prices as a premium
     if st.get("lead_firm") and "lead_time_days" in s:
         cur = st.get("stated", {}).get("lead_time_days", (current or {}).get("lead_time_days"))
         if cur is not None and s["lead_time_days"] < cur:
