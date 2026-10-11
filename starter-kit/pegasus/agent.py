@@ -62,6 +62,7 @@ QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+CALLOFF = os.environ.get("PEGASUS_CALLOFF", "0") == "1"  # experiment: firm level call-off schedule for a rationing supplier
 CONTRACT_LEAD = os.environ.get("PEGASUS_CONTRACT_LEAD", "0") == "1"  # experiment: cite the contract's delivery clause
 FIRM_JUMP = os.environ.get("PEGASUS_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
 FIRM_DROP = float(os.environ.get("PEGASUS_FIRM_DROP", "0.032"))
@@ -1568,6 +1569,26 @@ class PegasusAgent:
                     extra_refs.append(ref)
                 if att:
                     attachments.append(att)
+        if CALLOFF and k == 0 and sheets and (st.get("capacity_pressure") or st.get("capacity_tight")
+                                            or case["buyer"].get("category_goal") == "secure_supply"):
+            # A rationing supplier allocates to the customer whose demand it can plan on: firm, early,
+            # level call-offs (Grunow et al. 2021; Win Source; Eveneum). Its own letter: "we will
+            # prioritise customers with firm, long-term commitments". The schedule goes as a CSV it reads.
+            main = sheets[0]
+            vol = main.get("volume_per_year") or case["buyer"].get("need_per_year")
+            months = main.get("contract_months") or 12
+            lead = main.get("lead_time_days") or st["std"].get("lead_time_days") or 0
+            if vol:
+                monthly = int(round(vol / 12))
+                rows = "\n".join(f"{i},{monthly},firm" if i <= 2 else f"{i},{monthly},forecast" for i in range(1, months + 1))
+                att = {"name": "call-off-schedule.csv", "type": "csv",
+                       "content_b64": base64.b64encode(f"month,quantity,status\n{rows}\n".encode()).decode()}
+                attachments.append(att)
+                lines.append(f"We would rather be your most predictable customer than your loudest one: the attached "
+                             f"call-off schedule gives you level monthly releases of {monthly:,} pcs with no peaks over "
+                             f"{months} months, a firm horizon ahead of your {lead}-day lead time, no forecast inflation "
+                             "and no parallel enquiries elsewhere during the term - you plan on certainty.")
+                st["calloff_sent"] = True
         if not sheets:
             lines.append("Could you confirm a feasible package using the allowed terms?")
         if final_trade:
