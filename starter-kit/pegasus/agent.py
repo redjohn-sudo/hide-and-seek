@@ -815,6 +815,17 @@ class PegasusAgent:
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
 
+    def _margin_matters(self, st):
+        """The relationship charge can bite only when prices come near the supplier's full cost. P10:
+        full cost about 24 EUR against asks of 31-33 EUR - a secure_supply case where the charge is
+        zero at every price on the table, so it is played like any single supplier (pacing, a real
+        step before its usual final)."""
+        sup = st["std"].get("_floor")
+        if not sup:
+            return False
+        ask = st.get("ask") or st["open"].get("unit_price") or 0
+        return not (ask and sup.get("full_cost") and sup["full_cost"] < 0.85 * ask)
+
     def _before_final(self, case, threads, sid, st, target, c_s):
         """Our last offer before the reply that, in our earlier negotiations with this supplier,
         carried its final offer: jump to JUMP under its standing price. Distributors close at a fixed
@@ -822,7 +833,7 @@ class PegasusAgent:
         path; an offer near where they close can come back agreed, else they close where they
         would have anyway (P08: final 5.37 against our 5.01; the record sits near 5.15-5.20)."""
         fr = st.get("final_round")
-        if not fr or JUMP <= 0 or st["std"].get("_floor") or len(live_threads(threads)) > 1:
+        if not fr or JUMP <= 0 or self._margin_matters(st) or len(live_threads(threads)) > 1:
             return target
         replies = sum(1 for m in threads[sid] if m.get("from") != "buyer") - 1
         if replies != fr - 1 or st.get("jumped"):
@@ -844,7 +855,7 @@ class PegasusAgent:
         STEP_LO and STEP_HI of itself per round, the same step for every package (equal C). The
         distributor bots close as soon as a step looks small (P08: +1.2 % -> final 5.37) and close
         high after a big one (P07: +4.8 % -> final 5.52 at round 2; +1.5-2 % -> 5.46 at round 4)."""
-        if STEP_HI <= 0 or st["std"].get("_floor") or len(live_threads(threads)) > 1:
+        if STEP_HI <= 0 or self._margin_matters(st) or len(live_threads(threads)) > 1:
             return target
         prev = st.get("last_target")
         s0 = st.get("anchor_structure") or (st.get("last_sheets") and {f: st["last_sheets"][0].get(f) for f in eco.fields(case)})
