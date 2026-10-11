@@ -63,6 +63,7 @@ QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
+CLAUSE_FROM = int(os.environ.get("PEGASUS_CLAUSE_FROM", "2"))  # the wanted clause package only from our 3rd message
 HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
 STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
 STEP_HI = float(os.environ.get("PEGASUS_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
@@ -538,7 +539,11 @@ class PegasusAgent:
             s = {f: v for f, v in t.items() if f in eco.fields(case)}
             hi = max(10 * t["unit_price"], 1.0)
             c_open_rel = st.get("c_open_rel") or eco.standing_cost(case, st["open"], rel)
-            floor = eco.acceptable_floor(case, s, st["std"], hi, ANCHOR_ALPHA, c_open_rel)
+            series_w = (st.get("index_preference") or (None, False))[0]
+            if series_w and (t.get("index_clause") or {}).get("series") == series_w:
+                floor = eco.price_floor(case, s, st["std"], hi)  # the clause package: at its bottom, it agrees at once
+            else:
+                floor = eco.acceptable_floor(case, s, st["std"], hi, ANCHOR_ALPHA, c_open_rel)
             if t["unit_price"] < floor:
                 t["unit_price"] = round(floor, 2)
             c_t = eco.standing_cost(case, t, rel)
@@ -569,7 +574,7 @@ class PegasusAgent:
             room = MESO_TOL * max(c_open - c_best, 0.0)
             kept = [ts for c, ts in kept if c <= c_best + room]
             series = (st.get("index_preference") or (None, False))[0]
-            if (series and st.get("ranked")
+            if (series and st.get("ranked") and st.get("offers", 0) > CLAUSE_FROM
                     and not any((ts["terms"].get("index_clause") or {}).get("series") == series for ts in kept)):
                 # It wants this clause (its cost drivers, its reply) and gives its best prices with it
                 # (P02: 355.93 with the CU clause, 367-372 without). Offer it once, on the structure
@@ -634,6 +639,14 @@ class PegasusAgent:
                         if {f: x.get(f) for f in fields} == {f: t.get(f) for f in fields}]
                 if same and t["unit_price"] > max(same) + MAX_STEP * ask:
                     t["unit_price"] = round(max(same) + MAX_STEP * ask, 2)
+        # a commitment beyond the horizon neither costs nor earns in the published arithmetic, yet the
+        # arena charged 32 EUR for 36 months against 24 on P04 (record 0.874 = our deal on 24 months):
+        # among packages at the same price, the shortest contract that covers the horizon leads
+        hz = int(round(12 * (case["buyer"].get("horizon_years") or 0)))
+        if hz and "contract_months" in fields:
+            sheets.sort(key=lambda ts: (round(ts["terms"].get("unit_price") or 0, 2),
+                                        0 if (ts["terms"].get("contract_months") or 0) >= hz else 1,
+                                        ts["terms"].get("contract_months") or 0))
         # dedupe
         seen, out = set(), []
         for ts in sheets:
@@ -1237,8 +1250,12 @@ class PegasusAgent:
             # strategic supplier: only the structures whose U bottom is best, whatever the rules' own
             # ranking in plain C prefers (lot L P01: the rules path sent 90-day packages, 0.932)
             out = []
+            early = {**st, "wants_index": False}  # the clause it wants comes as its own package (see _floored)
             for s in st["rel_structures"]:
-                if rules.active(st) and not rules.allowed(case, st, s, current):
+                # the clause it wants (memory) is honoured from CLAUSE_FROM on; before that the
+                # clause-free packages go out alone - with the clause in hand it agrees at once and
+                # 0.735 is the ceiling (P02); without it the record sits near 367 at 90 days
+                if rules.active(early) and not rules.allowed(case, early, s, current):
                     continue
                 p = eco.price_for(case, s, target, st["std"])
                 if st.get("ask"):
