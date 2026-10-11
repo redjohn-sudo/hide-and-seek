@@ -1415,6 +1415,27 @@ class PegasusAgent:
             lines[-1] = ("thank you for your offer and for the step you made towards us on "
                          f"{case['title'].lower()} - we appreciate it.")
         cap = rules.claims_cap(st, MAX_CLAIMS if k == 0 else 1)  # only round-1 claims set the level; one new fact per round after
+        if len(chosen) < cap:
+            # top up from our own candidates: every verified argument lowers a frozen supplier's price
+            # (P03: one verified claim -> 432.94, two -> 431.63, in seven sessions); never the same
+            # kind twice in a message, never an ID already used in this case
+            kinds_in = {str(c["refs"][0]).split(":")[0] for c in chosen if c.get("refs")}
+            try:
+                extra = self.fallback_claims.candidates(sid, part, price, st["drivers"])
+            except Exception:
+                extra = []
+            for c in extra:
+                if len(chosen) >= cap:
+                    break
+                ids = set(c["refs"])
+                kind = str(c["refs"][0]).split(":")[0]
+                if ids & self.fallback_claims.used or kind in kinds_in or any(ids & set(x["refs"]) for x in chosen):
+                    continue
+                if kind == "po" and not st.get("order_claim_sent"):
+                    continue  # only the lowest-vs-latest form of it (above)
+                chosen.append(c)
+                kinds_in.add(kind)
+                self.fallback_claims.used |= ids
         for c in chosen[cap:]:  # not sent: give their IDs back to the ledger
             self.fallback_claims.used -= set(c["refs"])
             self.fallback_claims.used.discard((sid, tuple(c["refs"])))

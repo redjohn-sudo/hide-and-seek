@@ -179,8 +179,8 @@ class Claims:
     def candidates(self, supplier, part, price, drivers_text=""):
         extra = DRIVER_RE.findall(drivers_text or "")
         out = (self.notice_claim() + self.index_claims(part, extra) + self.should_cost_claim(part, price)
-               + self.forecast_claim(part) + self.scorecard_claim(supplier) + self.order_claim(supplier, part, price)
-               + self.quality_claim(supplier, part))
+               + self.forecast_claim(part) + self.scorecard_claim(supplier) + self.order_claim(supplier, part, price))
+        # quality notifications (quality_claim) are not candidates: they lowered P08/P10 (lot V)
         return sorted(out, key=lambda c: -c["weight"])
 
     def pick(self, supplier, part, price, drivers_text="", rivals=(), rivals_only=False, limit=MAX_PER_MESSAGE):
