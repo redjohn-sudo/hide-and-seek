@@ -62,6 +62,8 @@ QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+LATE_TRADE = os.environ.get("PEGASUS_LATE_TRADE", "0") == "1"  # experiment: needed lead time asked late, small premium
+LATE_SHARE = float(os.environ.get("PEGASUS_LATE_SHARE", "0.45"))
 JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
 CLAUSE_FROM = int(os.environ.get("PEGASUS_CLAUSE_FROM", "2"))  # the wanted clause package only from our 3rd message
 HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
@@ -521,6 +523,12 @@ class PegasusAgent:
             target = min(target, target_c) if moves_left(case, events) > 3 else target
         target = self._paced(case, threads, sid, st, target, c_s)
         target = self._before_final(case, threads, sid, st, target, c_s)
+        late = self._late_trade(case, threads, sid, st, target) if st.get("jumped") and not st.get("late_traded") else None
+        if late:
+            st["late_traded"] = True
+            st["offers"] += 1
+            st["last_target"] = target
+            return self._send(case, threads, sid, st, target, min(st["offers"], len(SCHEDULE) - 1), sheets=late, busy=busy)
         if target >= c_s * (1 - 1e-4):
             return self._done(case, threads, sid, st, busy, converged=True)
         st["offers"] += 1
@@ -815,6 +823,35 @@ class PegasusAgent:
         _, p, _, structure = max(candidates, key=lambda r: (r[0], r[1], -r[2]))
         return target, eco.sheet(case, structure, p)
 
+    def _late_trade(self, case, threads, sid, st, target):
+        """Experiment (PEGASUS_LATE_TRADE=1): in our last offer before its usual final, once its price
+        sits at its floor on the slow lead time it prefers, ask for the lead time we need for a small
+        premium - LATE_SHARE of what the faster delivery is worth to us. P10: floor about 31.10 at 56
+        days; 42 days is worth 0.71 EUR a unit to us; the record (0.741) is 31.41 at 42 days."""
+        if not LATE_TRADE:
+            return None
+        need = case["buyer"].get("need_lead_time_days")
+        opts = (case.get("term_options") or {}).get("lead_time_days") or []
+        sheet_id, terms = standing(threads[sid])
+        if not need or need not in opts or not terms or "lead_time_days" not in eco.fields(case):
+            return None
+        cur = eco.closing_terms(case, terms, st["std"])
+        if (cur.get("lead_time_days") or 0) <= need:
+            return None
+        structure = {f: cur[f] for f in eco.fields(case) if f != "unit_price"}
+        slow = eco.sheet(case, structure, st.get("jump_price") or eco.price_for(case, structure, target, st["std"]))
+        fast_s = {**structure, "lead_time_days": need}
+        fast0 = eco.sheet(case, fast_s, slow["unit_price"])
+        units = max(1.0, (case["buyer"].get("need_per_year") or 1) * (case["buyer"].get("horizon_years") or 1))
+        worth = (eco.cost(case, slow, st["std"]) - eco.cost(case, fast0, st["std"])) / units
+        if worth <= 0.01:
+            return None
+        fast = eco.sheet(case, fast_s, round(slow["unit_price"] + LATE_SHARE * worth, 2))
+        if not eco.ok(case, fast, st["std"]):
+            return None
+        log.info("%s %s: late trade - lead %s for +%.2f (worth %.2f to us)", case["case_id"], sid, need, LATE_SHARE * worth, worth)
+        return [fast]
+
     def _margin_matters(self, st):
         """The relationship charge can bite only when prices come near the supplier's full cost. P10:
         full cost about 24 EUR against asks of 31-33 EUR - a secure_supply case where the charge is
@@ -845,6 +882,7 @@ class PegasusAgent:
         jt = eco.cost(case, eco.sheet(case, s0, round(p_cs * (1 - JUMP), 2)), st["std"])
         if jt > target:
             st["jumped"] = True
+            st["jump_price"] = round(p_cs * (1 - JUMP), 2)
             log.info("%s %s: last offer before its usual final (reply %d) - %.2f", case["case_id"], sid, fr,
                      p_cs * (1 - JUMP))
             return min(jt, c_s)
