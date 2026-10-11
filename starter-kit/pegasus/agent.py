@@ -62,6 +62,8 @@ QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
 QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
 FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
 FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+FIXED_FIRST = os.environ.get("PEGASUS_FIXED_FIRST", "0") == "1"  # experiment: no clause from us for two messages
+MIRROR_ALONE = os.environ.get("PEGASUS_MIRROR_ALONE", "0") == "1"  # experiment: the deadband mirror as the only package
 CALLOFF = os.environ.get("PEGASUS_CALLOFF", "0") == "1"  # experiment: firm level call-off schedule for a rationing supplier
 CONTRACT_LEAD = os.environ.get("PEGASUS_CONTRACT_LEAD", "0") == "1"  # experiment: cite the contract's delivery clause
 FIRM_JUMP = os.environ.get("PEGASUS_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
@@ -654,7 +656,7 @@ class PegasusAgent:
             if (eco.ok(case, mirror, st["std"])
                     and eco.standing_cost(case, mirror, rel) < eco.standing_cost(case, standing_terms, rel) - 1e-6):
                 st["deadband_mirrored"] = True
-                sheets = sheets[:2] + [{"terms": mirror}]
+                sheets = [{"terms": mirror}] if MIRROR_ALONE else sheets[:2] + [{"terms": mirror}]
                 log.info("%s %s: deadband mirror %s", case["case_id"], sid, mirror)
         # the step cap (not for strategic suppliers: their packages follow the U)
         ask = st.get("ask")
@@ -1354,8 +1356,14 @@ class PegasusAgent:
                     out.append(t)
             if out:
                 return out
-        if rules.active(st):  # the supplier stated a constraint: honour it in every sheet
-            picked = rules.pick_sheets(case, st, target, current, st.get("ask"))
+        st_rules = st
+        if FIXED_FIRST and st.get("wants_index") and st.get("offers", 0) <= 2 and not st["std"].get("_floor"):
+            # fixed-price packages for two messages: the distributor then brings its own clause at a
+            # lower price (P08: 5.48 -> 5.25 with its deadband-0 clause, against 5.54 -> 5.41 when we
+            # offer the clause ourselves); its clause package comes back mirrored at the widest deadband
+            st_rules = {**st, "wants_index": False}
+        if rules.active(st_rules):  # the supplier stated a constraint: honour it in every sheet
+            picked = rules.pick_sheets(case, st_rules, target, current, st.get("ask"))
             if picked:
                 st["trade_offered"] = True
                 return picked
