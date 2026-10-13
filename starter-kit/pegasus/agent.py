@@ -180,6 +180,67 @@ def supplier_reference(case, events):
     return {**plan, **ref} if ref else (standard_terms(events) or plan)
 
 
+PRICE_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d{1,2})?)\s?(?:EUR\b|euros?\b|€)|(?:\bEUR|€)\s?(\d+(?:[.,]\d{1,2})?)(?![\d])", re.I)
+
+
+def prices_in(sentence):
+    """EUR amounts written in a sentence: 28.00 EUR, 28,00 EUR, EUR 28.00, 28.00 €, € 28,00."""
+    return [float((a or b).replace(",", ".")) for a, b in PRICE_RE.findall(sentence or "")]
+
+
+ATTACHED_RE = re.compile(r"\battached (?:packages?|terms?|term sheets?|price|additional commitment|fixed-price package)\b"
+                         r"|\bas attached\b|\bpackages below\b", re.I)
+COMMIT_RE = re.compile(r"We commit to a binding volume of ([\d,]+) (.+?) per year(?: over (\d+) months)?\.")
+CLOSERS = ("We value our cooperation.", "Best regards")
+
+
+def sync_body(case, msg, drafted):
+    """The body is written for the sheets as drafted; the floor, the polish (re-sorted packages, a
+    deadband mirror) and the visible step may change them afterwards. Make the words match what is
+    attached: no "attached packages" without a sheet, a changed price written as it now is, the
+    commitment line on the package that now leads."""
+    final = [ts["terms"] for ts in msg.get("term_sheets") or []]
+    body = msg.get("body") or ""
+    if not body:
+        return msg
+    fields = [f for f in case["negotiable"] if f != "unit_price"]
+
+    def key(t):
+        return json.dumps({f: t.get(f) for f in fields}, sort_keys=True, default=str)
+
+    lines = body.split("\n")
+    if drafted and not final:
+        # every package was dropped (dearer for us than its standing offer even at its bottom)
+        lines = [l for l in lines if not ATTACHED_RE.search(l)]
+        if not any("?" in l for l in lines):
+            at = next((i for i, l in enumerate(lines) if l.startswith(CLOSERS)), len(lines))
+            lines.insert(at, "Could you confirm your best price on your current terms?")
+    else:
+        if len(drafted) > 1 and len(final) == 1:
+            lines = [l.replace("Each of the attached packages works for us; please choose the one that suits you best.",
+                               "The attached package works for us.") for l in lines]
+        now = {key(t): t.get("unit_price") for t in final}
+        final_prices = {f"{p:.2f}" for p in now.values() if isinstance(p, (int, float))}
+        for d in drafted:
+            p_old, p_new = d.get("unit_price"), now.get(key(d))
+            if not isinstance(p_old, (int, float)) or not isinstance(p_new, (int, float)):
+                continue
+            old, new = f"{p_old:.2f}", f"{p_new:.2f}"
+            if old != new and old not in final_prices:
+                lines = [re.sub(rf"(?<![\d.]){re.escape(old)}(?!\d)", new, l) for l in lines]
+        if final and drafted and key(final[0]) != key(drafted[0]):
+            lead = final[0]
+
+            def commit(m):
+                vol = lead.get("volume_per_year")
+                vol_s = f"{vol:,}" if isinstance(vol, (int, float)) else m.group(1)
+                months = lead.get("contract_months") if "contract_months" in lead else m.group(3)
+                return f"We commit to a binding volume of {vol_s} {m.group(2)} per year" + (
+                    f" over {months} months." if months else ".")
+            lines = [COMMIT_RE.sub(commit, l) for l in lines]
+    return dict(msg, body="\n".join(lines))
+
+
 class PegasusAgent:
     def __init__(self, package=None, playbook=None, push_after_final=False):
         self.pkg, self.playbook, self.push_after_final = package, playbook or {}, push_after_final
@@ -377,16 +438,37 @@ class PegasusAgent:
     # -- decision ------------------------------------------------------------------------------
     def decide(self, case, threads, sid=None, busy=()):
         out = self._decide(case, threads, sid, busy)
+        if out and isinstance(out.get("message"), dict):
+            drafted = out["message"].pop("_drafted", None)  # internal keys never reach the arena
+            exact = out["message"].pop("_exact", False)
         if out and isinstance(out.get("message"), dict) and not out["message"].get("action") and out["message"].get("body"):
             who = out.get("supplier_id")
             st = self.state.get(who)
-            exact = out["message"].pop("_exact", False)
+            if drafted is None:
+                drafted = [dict(ts["terms"]) for ts in out["message"].get("term_sheets") or []]
             if st and out["message"].get("term_sheets") and not exact:
                 self._floored(case, st, out["message"])  # the one exit point: no path sends a sheet under the floor
+            # the body was written for the sheets as drafted: say what is really attached
+            out["message"] = sync_body(case, out["message"], drafted)
+            # ... and every message passes the guard here, whichever path wrote it (take its word,
+            # mirror, clause probe, questions after a final, the nudge line added after `_send`)
+            out["message"] = self._guarded(case, threads, who, st, out["message"])
             n = sum(m.get("from") == "buyer" for m in threads.get(who, [])) + 1
             subj = out["message"].get("subject") or f"Re: {case['title']}"
             out["message"]["subject"] = f"{subj} ({n})"[:300]
         return out
+
+    def _guarded(self, case, threads, sid, st, msg):
+        """`guard.check` on the message as it leaves (fail closed: offending lines dropped, an invalid
+        sheet turns the message into a safe question)."""
+        alt = (case["buyer"].get("alternative") or {}).get("terms") or {}
+        offers = {ts["term_sheet_id"] for ev in threads.values() for m in ev
+                  for ts in (m.get("term_sheets") or []) if ts.get("term_sheet_id")}
+        checked, problems = guard.check(case, msg, self.pkg.facts if self.pkg else {}, offers,
+                                        ask=(st or {}).get("ask"), alt_price=alt.get("unit_price"))
+        for p in problems:
+            log.warning("%s %s guard (exit): %s", case["case_id"], sid, p)
+        return checked
 
     def _decide(self, case, threads, sid=None, busy=()):
         if case["case_id"] != self.case_id:
@@ -425,7 +507,15 @@ class PegasusAgent:
             if ranked and price:
                 c_s = eco.cost(case, eco.sheet(case, ranked[0][1], price), st["std"])
         if sheet_id and c_s < float("inf"):
-            st["seen"].append(c_s)
+            # one entry per supplier message, not per decision: the 1-second wait loop and the resync
+            # after a refused close decide again on the same reply - appending then would read as
+            # "it stopped moving" (a false stall close, a false nudge)
+            n = sum(1 for m in events if m.get("from") != "buyer")
+            if st.get("seen_at") == n and st["seen"]:
+                st["seen"][-1] = c_s
+            else:
+                st["seen"].append(c_s)
+                st["seen_at"] = n
 
         text = last.get("body", "")
         if CASH_RE.search(text):
@@ -434,15 +524,23 @@ class PegasusAgent:
             st["freeze"] = True
         # read what the supplier said into signals once per reply (LLM with verified quotes, else keywords)
         key = (len(events), text[:80])
-        if text and st.get("read_key") != key:
-            st["read_key"] = key
+        fresh = st.get("read_key") != key
+        if text and (fresh or st.get("read_partial")):
             cached = self._observed.pop((sid, text[:200]), None)
-            st["last_signals"] = cached if cached is not None else reader.read(text)
-            reader.apply(st, st["last_signals"])
-            if "cost_floor" in st["last_signals"]:
-                st["floor_hits"] = st.get("floor_hits", 0) + 1
-            if st["last_signals"]:
-                log.info("%s %s heard: %s", case["case_id"], sid, sorted(st["last_signals"]))
+            if fresh or cached is not None:
+                had_floor = not fresh and "cost_floor" in (st.get("last_signals") or ())
+                st["read_key"] = key
+                if cached is None:
+                    # not read before the lock (an opening read still running, a resync): keywords now -
+                    # never an LLM call under the decision lock - and its reading once `observe` has it
+                    st["last_signals"], st["read_partial"] = reader.read(text, llm=False), reader.ENABLED
+                else:
+                    st["last_signals"], st["read_partial"] = cached, False
+                reader.apply(st, st["last_signals"])
+                if "cost_floor" in st["last_signals"] and not had_floor:
+                    st["floor_hits"] = st.get("floor_hits", 0) + 1
+                if st["last_signals"]:
+                    log.info("%s %s heard: %s", case["case_id"], sid, sorted(st["last_signals"]))
         said = self._take_its_word(case, threads, sid, st, busy)
         if said:
             return said
@@ -1147,8 +1245,7 @@ class PegasusAgent:
                 continue
             if not same_terms(sentence):
                 continue
-            for a1, a2 in re.findall(r"(\d+(?:\.\d{1,2})?) ?(?:EUR|euro)|€ ?(\d+(?:\.\d{1,2})?)", sentence):
-                p = float(a1 or a2)
+            for p in prices_in(sentence):
                 if (0.85 * p0 <= p < p0 * 0.997 and round(p, 2) not in ours and round(p, 2) not in tried
                         and round(p, 2) not in listed):
                     best = p if best is None else min(best, p)
@@ -1695,7 +1792,8 @@ class PegasusAgent:
         refs = [r for c in chosen for r in c["refs"]]
         refs += [r for r in extra_refs if r not in set(refs)]
         msg = {"subject": f"Re: {case['title']}" + (f" [{NONCE}]" if NONCE else ""), "body": "\n".join(lines),
-               "term_sheets": [{"terms": t} for t in sheets]}
+               "term_sheets": [{"terms": t} for t in sheets],
+               "_drafted": [dict(t) for t in sheets]}  # what the body was written for (see `sync_body`)
         if refs:
             msg["refs"] = refs[:20]
         if attachments:

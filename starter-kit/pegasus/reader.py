@@ -156,7 +156,7 @@ def validate(sig, line, quote):
         except (TypeError, ValueError):
             return False, None
         unit = UNITS[VALUED[kind]]
-        num = re.escape(f"{v:g}") + r"(?!\d|[.,]\d)"  # 54 is not 54.5
+        num = number_re(v) + r"(?!\d|[.,]\d)"  # 54 is not 54.5; 28.00 is 28
         near = re.compile(r"(?<![\d.,])" + num + r"\s*(?:%s)" % unit + "|" + r"(?:%s)\s*" % unit + num, re.I)
         m = near.search(line.replace("\u202f", " "))
         if not m:
@@ -166,6 +166,15 @@ def validate(sig, line, quote):
             return False, None  # two EUR amounts on one line: the one next to "chargeback" is the chargeback
         return True, v
     return True, None
+
+
+def number_re(v):
+    """A regex for the number v as a supplier writes it: 28, 28.00, 28,00; 373.9, 373.90, 373,90."""
+    whole, _, frac = f"{abs(v):.6f}".rstrip("0").rstrip(".").partition(".")
+    sign = "-" if v < 0 else ""
+    if frac:
+        return re.escape(sign + whole) + r"[.,]" + frac + "0*"
+    return re.escape(sign + whole) + r"(?:[.,]0+)?"
 
 
 def _lines(text):
@@ -227,15 +236,16 @@ def _llm(lines):
     return json.loads(r.json()["choices"][0]["message"]["content"] or "{}")
 
 
-def read(text):
+def read(text, llm=True):
     """Signal types stated in a supplier e-mail (with the numbers they carry): LLM with verified
-    quotes, archived and replayed by fingerprint, else keywords."""
+    quotes, archived and replayed by fingerprint, else keywords. `llm=False`: keywords only (no
+    network call, e.g. under the decision lock)."""
     found = Signals(keyword_signals(text))
     if "chargeback_too_high" in found and re.search(
             r"zero chargebacks?|no chargebacks?|(?:can't|cannot|do not|don't|won't) (?:accept|do|take|work with) (?:any )?chargebacks?",
             (text or "").lower()):
         found.values["chargeback_eur_per_complaint"] = 0.0  # it refuses them altogether
-    if not ENABLED or not text:
+    if not ENABLED or not text or not llm:
         return found
     lines = _lines(text)
     t0 = time.monotonic()

@@ -132,10 +132,15 @@ def implied_rate(sheets):
     beside 368.68 at 14 -> 6.6 %, the rate fitted on the arena's own charges. None without a pair."""
     rates = []
     for x, y in combinations(sheets, 2):
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            continue
         diff = {k for k in set(x) | set(y) if x.get(k) != y.get(k)}
         if diff != {"unit_price", "payment_days"}:
             continue
-        p1, d1, p2, d2 = x["unit_price"], x["payment_days"], y["unit_price"], y["payment_days"]
+        # a sheet that omits a field (or states it as None) is no pair: no KeyError, no TypeError
+        p1, d1, p2, d2 = x.get("unit_price"), x.get("payment_days"), y.get("unit_price"), y.get("payment_days")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (p1, d1, p2, d2)):
+            continue
         den = p1 * d1 - p2 * d2
         if not den:
             continue

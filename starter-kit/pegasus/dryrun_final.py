@@ -24,7 +24,13 @@ memory.FILE = Path(os.environ["PEGASUS_MEMORY"])
 from pegasus.agent import PegasusAgent  # noqa: E402
 from pegasus.play import play_waves  # noqa: E402
 
-CASES = {c["case_id"]: c for c in json.load(open(os.path.expanduser("~/tacto/codex-work/arena-data/cases-practice.json")))}
+REPO = Path(__file__).resolve().parents[2]
+# the practice case files: PEGASUS_CASES, else the copy in this repository (analysis/cases-practice.json)
+CASES_FILE = Path(os.environ.get("PEGASUS_CASES") or REPO / "analysis" / "cases-practice.json").expanduser()
+CASES = {c["case_id"]: c for c in json.loads(CASES_FILE.read_text(encoding="utf-8"))}
+# the data package: ARENA_DATA, else data/package (the kit's layout), else this repository's data/
+DATA = next((d for d in (os.environ.get("ARENA_DATA"), "data/package", str(REPO / "data"))
+             if d and (Path(d) / "facts.json").is_file()), os.environ.get("ARENA_DATA") or "data/package")
 
 
 class FakeArena:
@@ -111,7 +117,7 @@ def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    pkg = DataPackage("data/package")
+    pkg = DataPackage(DATA)
     arena = FakeArena(["case:P04", "case:P07"], cap_s=96)  # closing fires ~6 s in (cap - 90 s)
     t0 = time.time()
     results = play_waves(arena, lambda: PegasusAgent(pkg), waves=1, parallel=10, poll=1.0)
