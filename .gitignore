@@ -5,3 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Bulky run output: session exports, lot logs, logs. The files already tracked stay tracked
+# (ignoring applies to new files only); see starter-kit/pegasus/README.md.
+analysis/sessions/
+analysis/lots/
+*.log

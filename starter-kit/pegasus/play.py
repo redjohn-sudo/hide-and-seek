@@ -6,9 +6,10 @@ share one agent under a lock; the first accept or walk-away ends the case for al
 """
 
 import logging
+import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from arena_kit.client import ArenaError
 from arena_kit.play import (
@@ -23,6 +24,8 @@ from arena_kit.play import (
 )
 
 log = logging.getLogger("pegasus")
+# total wait for the opening readings (PEGASUS_READER=1) before the workers start
+OPEN_READ_BUDGET_S = float(os.environ.get("PEGASUS_OPEN_READ_BUDGET_S", "12"))
 
 
 def closing(agent, case, threads):
@@ -36,6 +39,29 @@ def closing(agent, case, threads):
     return closing_move(case, threads)
 
 
+def observe_openings(agent, threads, budget=None):
+    """Read each thread's latest supplier message (the only one `decide` looks up) in parallel, and
+    wait at most `budget` seconds in all: the 60-second clock runs from the supplier's opening, and
+    in series five readings of up to 20 s each would spend it before our first message. A reading
+    still running after the budget finishes in the background; `decide` meanwhile reads the message
+    with keywords and takes the LLM's reading once it is there."""
+    budget = OPEN_READ_BUDGET_S if budget is None else budget
+    todo = []
+    for s_id, events in threads.items():
+        m = next((x for x in reversed(events) if x.get("from") != "buyer"), None)
+        if m and m.get("body"):
+            todo.append((s_id, m))
+    if not todo:
+        return
+    pool = ThreadPoolExecutor(max_workers=len(todo))
+    futures = [pool.submit(agent.observe, s_id, m) for s_id, m in todo]
+    _, pending = wait(futures, timeout=budget)
+    if pending:
+        log.warning("opening reads: %d of %d still running after %.0f s - deciding with keywords meanwhile",
+                    len(pending), len(todo), budget)
+    pool.shutdown(wait=False)
+
+
 def play_case(table, case_id, agent, deadline=None):
     case, threads = table.open(case_id)
     if getattr(table, "done", None):
@@ -44,11 +70,9 @@ def play_case(table, case_id, agent, deadline=None):
         for m in events:
             fetch_documents(table, m)
     if hasattr(agent, "observe"):
-        for s_id, events in threads.items():
-            for m in events:
-                agent.observe(s_id, m)
+        observe_openings(agent, threads)
     lock, done = threading.Lock(), threading.Event()
-    box, slowest, inflight = {}, [0.0], set()
+    box, slowest, inflight, alive = {}, [0.0], set(), [len(threads)]
 
     def finish(sid, msg):
         """Close the case; False if the arena refused (e.g. a stale sheet) - then decide again."""
@@ -62,7 +86,47 @@ def play_case(table, case_id, agent, deadline=None):
         done.set()
         return True
 
+    def close_open(why):
+        """No worker is left but the case is still open (e.g. a 422 on the only thread, a failed
+        resync): close it now with the closing move - an open case scores 0. A refused sheet is
+        dropped and the move recomputed (at most three tries)."""
+        for _ in range(3):
+            with lock:
+                if done.is_set():
+                    return
+                try:
+                    move = closing(agent, case, threads)
+                except Exception:  # e.g. the kit's closing move with no live thread left
+                    log.exception("%s: no closing move", case_id)
+                    return
+                if not move:
+                    return
+                log.warning("%s: %s - no worker left, closing move %s", case_id, why, move["message"].get("action"))
+                if finish(move["supplier_id"], move["message"]):
+                    return
+                sheet = (move["message"].get("action") or {}).get("term_sheet_id")
+                if hasattr(agent, "refuse") and sheet:
+                    agent.refuse(sheet)
+
     def worker(sid):
+        why = "worker ended"
+        try:
+            why = run(sid) or why
+        except BaseException:
+            why = "worker failed"
+            raise
+        finally:
+            with lock:
+                alive[0] -= 1
+                last = alive[0] == 0
+            if last and not done.is_set():
+                try:
+                    close_open(why)
+                except Exception:
+                    log.exception("%s: closing move failed", case_id)
+
+    def run(sid):
+        """One supplier thread until the case ends; returns why it stopped early, if it did."""
         while not done.is_set():
             t0 = time.monotonic()
             with lock:
@@ -101,7 +165,7 @@ def play_case(table, case_id, agent, deadline=None):
                         threads[dsid] = [fetch_documents(table, m) for m in fresh]
                     except ArenaError as e:
                         log.warning("%s: resync failed: %s", case_id, e.detail)
-                        return
+                        return "resync failed"
                     continue
                 inflight.add(dsid)
             try:
@@ -112,7 +176,7 @@ def play_case(table, case_id, agent, deadline=None):
                         inflight.discard(dsid)
                     log.warning("%s %s: %s", case_id, dsid, e.detail)
                     if e.status == 422:  # an invalid message uses no round: log and stop this thread
-                        return
+                        return "422 on send"  # the last worker out closes the case (see `worker`)
                     raise
                 reply = table.missed(dsid, e)
             if "result" in reply:
@@ -131,13 +195,16 @@ def play_case(table, case_id, agent, deadline=None):
         with ThreadPoolExecutor(max_workers=len(threads)) as pool:
             list(pool.map(worker, list(threads)))
     except Exception:
-        # a worker died (e.g. a send failed): the other threads have ended; close what is still open
-        if done.is_set() or table.client.session(table.session_id).get("status") == "ended":
-            raise
-        log.exception("%s: a worker failed, closing move", case_id)
-        move = closing(agent, case, threads)
-        if not finish(move["supplier_id"], move["message"]):
-            raise
+        # a worker died (e.g. a send failed): the last worker out has already tried the closing move
+        if done.is_set():
+            log.exception("%s: a worker failed; the case is closed", case_id)
+        elif table.client.session(table.session_id).get("status") == "ended":
+            log.exception("%s: a worker failed; the case has ended", case_id)
+        else:
+            log.exception("%s: a worker failed, closing move", case_id)
+            move = closing(agent, case, threads)
+            if not move or not finish(move["supplier_id"], move["message"]):
+                raise
     result = box.get("result") or table.result()
     if hasattr(agent, "finish"):
         agent.finish(case, threads, result)
