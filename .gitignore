@@ -7,7 +7,7 @@ __pycache__/
 .DS_Store
 
 # Bulky run output: session exports, lot logs, logs. The files already tracked stay tracked
-# (ignoring applies to new files only); see starter-kit/pegasus/README.md.
+# (ignoring applies to new files only); see starter-kit/hide_and_seek/README.md.
 analysis/sessions/
 analysis/lots/
 *.log

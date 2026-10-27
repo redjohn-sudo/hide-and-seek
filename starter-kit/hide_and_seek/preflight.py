@@ -1,6 +1,6 @@
 """Pre-flight before the Live Final: everything the runner needs, checked in one go, no secrets printed.
 
-uv run python -m pegasus.preflight
+uv run python -m hide_and_seek.preflight
 Exit code 1 if anything is red. Pattern from the team's oblivion project (`entraide/verification.py`:
 a list of (ok, message), no secret shown, clock drift against the server's Date header).
 """
@@ -58,13 +58,13 @@ def check():
         out.append((ok and took < 20, f"LLM {model} reachable in {took:.1f}s (status {r.status_code})"))
     except Exception as e:
         out.append((False, f"LLM failed: {type(e).__name__}"))
-    out.append((os.environ.get("PEGASUS_READER", "0") == "1", f"PEGASUS_READER={os.environ.get('PEGASUS_READER', '0')} (1 expected for the final)"))
-    out.append((os.environ.get("PEGASUS_TEAM_CLAIMS", "1") == "1", f"PEGASUS_TEAM_CLAIMS={os.environ.get('PEGASUS_TEAM_CLAIMS', '1')}"))
+    out.append((os.environ.get("HIDE_AND_SEEK_READER", "0") == "1", f"HIDE_AND_SEEK_READER={os.environ.get('HIDE_AND_SEEK_READER', '0')} (1 expected for the final)"))
+    out.append((os.environ.get("HIDE_AND_SEEK_TEAM_CLAIMS", "1") == "1", f"HIDE_AND_SEEK_TEAM_CLAIMS={os.environ.get('HIDE_AND_SEEK_TEAM_CLAIMS', '1')}"))
     try:
         from . import adapt, agent, economics, guard, memory, play, reader  # noqa: F401
-        out.append((True, "pegasus modules import"))
+        out.append((True, "hide_and_seek modules import"))
     except Exception as e:
-        out.append((False, f"pegasus import failed: {e}"))
+        out.append((False, f"hide_and_seek import failed: {e}"))
     return out
 
 

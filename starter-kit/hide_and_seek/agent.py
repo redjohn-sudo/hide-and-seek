@@ -1,4 +1,4 @@
-"""The pegasus buyer: code decides every number, a template writes the e-mail.
+"""The hide_and_seek buyer: code decides every number, a template writes the e-mail.
 
 Per thread it
 - prices structures (combinations of the non-price fields) at the price that leaves the supplier
@@ -30,57 +30,57 @@ try:  # Nevil's evidence lane (hollerau/evidence, PR #4): filtered claim union +
     from hollerau.evidence import adapter as team_claims
 except Exception:  # pragma: no cover - the package is optional
     team_claims = None
-TEAM_CLAIMS = os.environ.get("PEGASUS_TEAM_CLAIMS", "1") == "1" and team_claims is not None
+TEAM_CLAIMS = os.environ.get("HIDE_AND_SEEK_TEAM_CLAIMS", "1") == "1" and team_claims is not None
 from .claims import Claims
 from .claims_intel import Claims as IntelClaims
 from .intel_bridge import Intelligence
 
-log = logging.getLogger("pegasus")
+log = logging.getLogger("hide_and_seek")
 
 # Tunables (environment, for the sandbox bench): structure ranking and opening anchor.
-RANK_INDIFFERENT = os.environ.get("PEGASUS_RANK", "fixed") == "indifferent"
-ANCHOR_DROP = float(os.environ.get("PEGASUS_ANCHOR", "0.80"))      # share of the supplier's price
-PI_ANCHOR = float(os.environ.get("PEGASUS_PI_ANCHOR", "0.94"))     # price increase: share of current
-MIN_STEP = float(os.environ.get("PEGASUS_MIN_STEP", "0.15"))  # share of the gap to their offer
-RFQ_CAP = float(os.environ.get("PEGASUS_RFQ_CAP", "0.995"))   # a bidder never gets a target above this x the best rival
-EXPECT = float(os.environ.get("PEGASUS_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
-ANCHOR_KEEP = float(os.environ.get("PEGASUS_ANCHOR_KEEP", "0.95"))
+RANK_INDIFFERENT = os.environ.get("HIDE_AND_SEEK_RANK", "fixed") == "indifferent"
+ANCHOR_DROP = float(os.environ.get("HIDE_AND_SEEK_ANCHOR", "0.80"))      # share of the supplier's price
+PI_ANCHOR = float(os.environ.get("HIDE_AND_SEEK_PI_ANCHOR", "0.94"))     # price increase: share of current
+MIN_STEP = float(os.environ.get("HIDE_AND_SEEK_MIN_STEP", "0.15"))  # share of the gap to their offer
+RFQ_CAP = float(os.environ.get("HIDE_AND_SEEK_RFQ_CAP", "0.995"))   # a bidder never gets a target above this x the best rival
+EXPECT = float(os.environ.get("HIDE_AND_SEEK_EXPECT", "0.67"))     # where between our anchor and its ask we expect to sign
+ANCHOR_KEEP = float(os.environ.get("HIDE_AND_SEEK_ANCHOR_KEEP", "0.95"))
 # strategic suppliers: a package may cost us at most this share of the best package's saving more than it
-MESO_TOL = float(os.environ.get("PEGASUS_MESO_TOL", "0.04"))
+MESO_TOL = float(os.environ.get("HIDE_AND_SEEK_MESO_TOL", "0.04"))
 # strategic suppliers: how much of the saving an opening may give away if it were agreed at once
 # (0.5: P01 opens near 123 like the 0.998 run; 0 = open at the bottom of the U, 128.95: 0.949-0.956)
-ANCHOR_ALPHA = float(os.environ.get("PEGASUS_ANCHOR_ALPHA", "0.5"))
-MIN_VISIBLE = float(os.environ.get("PEGASUS_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
-MAX_STEP = float(os.environ.get("PEGASUS_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
-NO_CHARGEBACK = os.environ.get("PEGASUS_NO_CHARGEBACK", "0") == "1"
-TAKE_ITS_WORD = os.environ.get("PEGASUS_TAKE_WORD", "1") == "1"
-CLAUSE_PROBE = os.environ.get("PEGASUS_CLAUSE_PROBE", "1") == "1"
+ANCHOR_ALPHA = float(os.environ.get("HIDE_AND_SEEK_ANCHOR_ALPHA", "0.5"))
+MIN_VISIBLE = float(os.environ.get("HIDE_AND_SEEK_MIN_VISIBLE", "0.004"))  # every new price moves at least this share
+MAX_STEP = float(os.environ.get("HIDE_AND_SEEK_MAX_STEP", "0"))  # off: capping one package broke equal C (lot K P04 took 60 days)  # ... and at most this share of its price per round
+NO_CHARGEBACK = os.environ.get("HIDE_AND_SEEK_NO_CHARGEBACK", "0") == "1"
+TAKE_ITS_WORD = os.environ.get("HIDE_AND_SEEK_TAKE_WORD", "1") == "1"
+CLAUSE_PROBE = os.environ.get("HIDE_AND_SEEK_CLAUSE_PROBE", "1") == "1"
 # quote: facts as claims come back "irrelevant - does not concern this part or our company" (lot U: P08 0.67 -> 0.53,
 # P11 0.84 -> 0.76): off
 # quality notifications in the first message: lot V P08 0.67 -> 0.62, P10 0.70 -> 0.69 - off
-QUALITY_CLAIM = os.environ.get("PEGASUS_QUALITY_CLAIM", "0") == "1"
-QUOTE_CLAIMS = os.environ.get("PEGASUS_QUOTE_CLAIMS", "0") == "1"
-FINAL_ASK = os.environ.get("PEGASUS_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
-FINAL_ASK_MAX = int(os.environ.get("PEGASUS_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
-FIXED_FIRST = os.environ.get("PEGASUS_FIXED_FIRST", "0") == "1"  # experiment: no clause from us for two messages
-MIRROR_ALONE = os.environ.get("PEGASUS_MIRROR_ALONE", "0") == "1"  # experiment: the deadband mirror as the only package
-CALLOFF = os.environ.get("PEGASUS_CALLOFF", "0") == "1"  # experiment: firm level call-off schedule for a rationing supplier
-CONTRACT_LEAD = os.environ.get("PEGASUS_CONTRACT_LEAD", "0") == "1"  # experiment: cite the contract's delivery clause
-FIRM_JUMP = os.environ.get("PEGASUS_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
-FIRM_DROP = float(os.environ.get("PEGASUS_FIRM_DROP", "0.032"))
-LATE_TRADE = os.environ.get("PEGASUS_LATE_TRADE", "0") == "1"  # experiment: needed lead time asked late, small premium
-LATE_SHARE = float(os.environ.get("PEGASUS_LATE_SHARE", "0.45"))
-JUMP = float(os.environ.get("PEGASUS_JUMP", "0.035"))  # last offer before its usual final: this far under its price
-CLAUSE_FROM = int(os.environ.get("PEGASUS_CLAUSE_FROM", "2"))  # the wanted clause package only from our 3rd message
-HOLD_NUDGE = os.environ.get("PEGASUS_HOLD_NUDGE", "1") == "1"
-STEP_LO = float(os.environ.get("PEGASUS_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
-STEP_HI = float(os.environ.get("PEGASUS_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
+QUALITY_CLAIM = os.environ.get("HIDE_AND_SEEK_QUALITY_CLAIM", "0") == "1"
+QUOTE_CLAIMS = os.environ.get("HIDE_AND_SEEK_QUOTE_CLAIMS", "0") == "1"
+FINAL_ASK = os.environ.get("HIDE_AND_SEEK_FINAL_ASK", "1") == "1"  # sheetless questions after its final offer
+FINAL_ASK_MAX = int(os.environ.get("HIDE_AND_SEEK_FINAL_ASK_MAX", "8"))  # ... up to this many (bounded by the round limit)
+FIXED_FIRST = os.environ.get("HIDE_AND_SEEK_FIXED_FIRST", "0") == "1"  # experiment: no clause from us for two messages
+MIRROR_ALONE = os.environ.get("HIDE_AND_SEEK_MIRROR_ALONE", "0") == "1"  # experiment: the deadband mirror as the only package
+CALLOFF = os.environ.get("HIDE_AND_SEEK_CALLOFF", "0") == "1"  # experiment: firm level call-off schedule for a rationing supplier
+CONTRACT_LEAD = os.environ.get("HIDE_AND_SEEK_CONTRACT_LEAD", "0") == "1"  # experiment: cite the contract's delivery clause
+FIRM_JUMP = os.environ.get("HIDE_AND_SEEK_FIRM_JUMP", "0") == "1"  # experiment: one firm package before its usual final
+FIRM_DROP = float(os.environ.get("HIDE_AND_SEEK_FIRM_DROP", "0.032"))
+LATE_TRADE = os.environ.get("HIDE_AND_SEEK_LATE_TRADE", "0") == "1"  # experiment: needed lead time asked late, small premium
+LATE_SHARE = float(os.environ.get("HIDE_AND_SEEK_LATE_SHARE", "0.45"))
+JUMP = float(os.environ.get("HIDE_AND_SEEK_JUMP", "0.035"))  # last offer before its usual final: this far under its price
+CLAUSE_FROM = int(os.environ.get("HIDE_AND_SEEK_CLAUSE_FROM", "2"))  # the wanted clause package only from our 3rd message
+HOLD_NUDGE = os.environ.get("HIDE_AND_SEEK_HOLD_NUDGE", "1") == "1"
+STEP_LO = float(os.environ.get("HIDE_AND_SEEK_STEP_LO", "0.012"))  # one supplier, no relationship charge: price step
+STEP_HI = float(os.environ.get("HIDE_AND_SEEK_STEP_HI", "0.022"))  # per round between these shares of the price  # after an agreed clause package, ask once without it  # a lower price written in its prose: take it  # off: our cb 500 got its 300/cb0 ladder (0.794)
 # push once more after an early "agreed"? off: its agreed offer stands anyway ("our agreed offer stands" x4)
-PUSH_AGREED = os.environ.get("PEGASUS_PUSH_AGREED", "0") == "1"
+PUSH_AGREED = os.environ.get("HIDE_AND_SEEK_PUSH_AGREED", "0") == "1"
 # one tick under its open offer before taking it (P04: 4.93 would score 1.000 where its 4.94 scored 0.860)
-NUDGE = os.environ.get("PEGASUS_NUDGE", "1") == "1"
+NUDGE = os.environ.get("HIDE_AND_SEEK_NUDGE", "1") == "1"
 # answer its "which figures is that based on?" with the forecast fact and its monthly lines as a CSV
-SUBSTANTIATE = os.environ.get("PEGASUS_SUBSTANTIATE", "1") == "1"
+SUBSTANTIATE = os.environ.get("HIDE_AND_SEEK_SUBSTANTIATE", "1") == "1"
 QUESTION_RE = re.compile(
     r"which figures|underlying (?:data|forecast)|forecast data|consumption data|substantiat"
     r"|(?:what|which) volume (?:can|could|will) you commit|binding (?:volume|release)"
@@ -88,29 +88,29 @@ QUESTION_RE = re.compile(
     r"|data (?:behind|supporting|confirming)"
     r"|provide (?:the |your )?(?:actual |underlying )?(?:data|figures|forecasts?)"
     r"|based on\?|which data")
-ANCHOR_FLOOR = float(os.environ.get("PEGASUS_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
-FINAL_TRADE = os.environ.get("PEGASUS_FINAL_TRADE", "0") == "1"
+ANCHOR_FLOOR = float(os.environ.get("HIDE_AND_SEEK_ANCHOR_FLOOR", "0.90"))  # relationship cases: anchor >= this x floor (0.97: P01 0.973; 0.945: 0.941; the 0.998 run opened at 122.7)  # keep the anchor structure within this share of the best price
+FINAL_TRADE = os.environ.get("HIDE_AND_SEEK_FINAL_TRADE", "0") == "1"
 # Research-backed message tactics (sandbox bench decides which stay on)
-ESCALATE = os.environ.get("PEGASUS_ESCALATE", "0") == "1"      # ask its management early (PON)
-CONDITIONAL = os.environ.get("PEGASUS_COND", "0") == "1"       # "if you can do X, we commit to Y"
-WARM = os.environ.get("PEGASUS_WARM", "0") == "1"              # specific thanks + open question (MIT)
-MAX_CLAIMS = int(os.environ.get("PEGASUS_MAX_CLAIMS", "3"))    # fewer, stronger arguments (Maaravi)
-CASH_PREMIUM = float(os.environ.get("PEGASUS_CASH_PREMIUM", "0"))  # faster payment costs it extra
-GAP_LINE = os.environ.get("PEGASUS_GAP", "0") == "1"           # RFQ: tell each bidder its gap in %
-NONCE = os.environ.get("PEGASUS_NONCE", "")  # bench only: a run tag in the subject defeats the reply cache
-TFT = float(os.environ.get("PEGASUS_TFT", "0"))          # >0: reciprocal steps (x supplier's last move)
-MIN_TFT = float(os.environ.get("PEGASUS_MIN_TFT", "0.05"))  # plus this share of the gap, so we always move
+ESCALATE = os.environ.get("HIDE_AND_SEEK_ESCALATE", "0") == "1"      # ask its management early (PON)
+CONDITIONAL = os.environ.get("HIDE_AND_SEEK_COND", "0") == "1"       # "if you can do X, we commit to Y"
+WARM = os.environ.get("HIDE_AND_SEEK_WARM", "0") == "1"              # specific thanks + open question (MIT)
+MAX_CLAIMS = int(os.environ.get("HIDE_AND_SEEK_MAX_CLAIMS", "3"))    # fewer, stronger arguments (Maaravi)
+CASH_PREMIUM = float(os.environ.get("HIDE_AND_SEEK_CASH_PREMIUM", "0"))  # faster payment costs it extra
+GAP_LINE = os.environ.get("HIDE_AND_SEEK_GAP", "0") == "1"           # RFQ: tell each bidder its gap in %
+NONCE = os.environ.get("HIDE_AND_SEEK_NONCE", "")  # bench only: a run tag in the subject defeats the reply cache
+TFT = float(os.environ.get("HIDE_AND_SEEK_TFT", "0"))          # >0: reciprocal steps (x supplier's last move)
+MIN_TFT = float(os.environ.get("HIDE_AND_SEEK_MIN_TFT", "0.05"))  # plus this share of the gap, so we always move
 # Three independent experiments; setting all three to 0 reproduces r9.
-CAPACITY_ANCHOR = float(os.environ.get("PEGASUS_CAPACITY_ANCHOR", "0.94"))
-APPROVAL_REVIEW = os.environ.get("PEGASUS_APPROVAL_REVIEW", "1") == "1"
-RFQ_BAFO = os.environ.get("PEGASUS_RFQ_BAFO", "0") == "1"
+CAPACITY_ANCHOR = float(os.environ.get("HIDE_AND_SEEK_CAPACITY_ANCHOR", "0.94"))
+APPROVAL_REVIEW = os.environ.get("HIDE_AND_SEEK_APPROVAL_REVIEW", "1") == "1"
+RFQ_BAFO = os.environ.get("HIDE_AND_SEEK_RFQ_BAFO", "0") == "1"
 # Share of the remaining gap (anchor -> supplier's standing C) we have conceded after k offers.
 SCHEDULE = [float(x) for x in os.environ.get(
-    "PEGASUS_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
+    "HIDE_AND_SEEK_SCHEDULE", "0,0.22,0.38,0.52,0.63,0.72,0.80,0.86,0.90,0.93").split(",")]
 # Off by default: on the sandbox (D02) walking up from the direct cost scored 0.534 vs 0.702.
-USE_FLOOR = os.environ.get("PEGASUS_FLOOR", "0") == "1"
-FLOOR_MARGIN = float(os.environ.get("PEGASUS_FLOOR_MARGIN", "0.015"))  # over direct cost
-FLOOR_STEP = float(os.environ.get("PEGASUS_FLOOR_STEP", "0.008"))      # per offer once known
+USE_FLOOR = os.environ.get("HIDE_AND_SEEK_FLOOR", "0") == "1"
+FLOOR_MARGIN = float(os.environ.get("HIDE_AND_SEEK_FLOOR_MARGIN", "0.015"))  # over direct cost
+FLOOR_STEP = float(os.environ.get("HIDE_AND_SEEK_FLOOR_STEP", "0.008"))      # per offer once known
 OVERHEAD_RE = re.compile(r"overhead|profit|margin|gewinn|marge", re.I)
 CASH_RE = re.compile(r"faster payment|cash|liquidit|zahlungsziel", re.I)
 FREEZE_RE = re.compile(r"frozen|freeze|cannot give up margin|no price reduction", re.I)
@@ -241,7 +241,7 @@ def sync_body(case, msg, drafted):
     return dict(msg, body="\n".join(lines))
 
 
-class PegasusAgent:
+class HideAndSeekAgent:
     def __init__(self, package=None, playbook=None, push_after_final=False):
         self.pkg, self.playbook, self.push_after_final = package, playbook or {}, push_after_final
         self.refused, self.mirrored = set(), set()  # sheet IDs the arena refused / we sent back
@@ -574,7 +574,7 @@ class PegasusAgent:
             else:
                 return self._done(case, threads, sid, st, busy)
         if status == "final_offer" and not (self.push_after_final and not st.get("pushed")):
-            # pushing after a final offer made P02 walk away (lot B): off unless PEGASUS_FINAL_TRADE=1
+            # pushing after a final offer made P02 walk away (lot B): off unless HIDE_AND_SEEK_FINAL_TRADE=1
             trade = self._fresh_final_trade(case, threads, sid, st, c_s, busy) if FINAL_TRADE else None
             if trade:
                 target, sheet = trade
@@ -942,7 +942,7 @@ class PegasusAgent:
         return target, eco.sheet(case, structure, p)
 
     def _firm_jump(self, case, threads, sid, st):
-        """Experiment (PEGASUS_FIRM_JUMP=1): our last offer before its usual final is ONE package -
+        """Experiment (HIDE_AND_SEEK_FIRM_JUMP=1): our last offer before its usual final is ONE package -
         its own terms on the longest contract it accepts, FIRM_DROP under its standing price - with a
         firm order and a request for its management's approval. Its concessions are tied to the
         commitment ("authorized an adjustment ... for this extended commitment ... for the specified
@@ -964,7 +964,7 @@ class PegasusAgent:
         return [sheet]
 
     def _late_trade(self, case, threads, sid, st, target):
-        """Experiment (PEGASUS_LATE_TRADE=1): in our last offer before its usual final, once its price
+        """Experiment (HIDE_AND_SEEK_LATE_TRADE=1): in our last offer before its usual final, once its price
         sits at its floor on the slow lead time it prefers, ask for the lead time we need for a small
         premium - LATE_SHARE of what the faster delivery is worth to us. P10: floor about 31.10 at 56
         days; 42 days is worth 0.71 EUR a unit to us; the record (0.741) is 31.41 at 42 days."""
@@ -1554,7 +1554,7 @@ class PegasusAgent:
             try:  # the team's filters drop claims that work against us (volume to a saturated supplier, ...)
                 cands = ([x for r in rivals for x in self.fallback_claims.rival_claim(*r)]
                          + self.fallback_claims.candidates(sid, part, price, st["drivers"]))
-                picked = team_claims.pegasus_claims(case, self.pkg, cands, used=self.fallback_claims.used,
+                picked = team_claims.hide_and_seek_claims(case, self.pkg, cands, used=self.fallback_claims.used,
                                                     supplier=sid)[:rules.claims_cap(st, MAX_CLAIMS)]
                 team_claims.remember(picked, sid, self.fallback_claims.used)
                 # order-history claims (po:) were accepted 4 times out of 44 in a public 100-session calibration

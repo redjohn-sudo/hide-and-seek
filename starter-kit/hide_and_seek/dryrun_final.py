@@ -1,6 +1,6 @@
 """Offline rehearsal of the Live Final path: play_waves -> play_case -> decide/closing/finish against
 a fake arena (one wave, two cases, a supplier that concedes then holds, a cap that forces the
-closing move on one case). No network, no quota. `uv run python -m pegasus.dryrun_final`"""
+closing move on one case). No network, no quota. `uv run python -m hide_and_seek.dryrun_final`"""
 
 import json
 import os
@@ -10,23 +10,23 @@ import threading
 import time
 from pathlib import Path
 
-os.environ.setdefault("PEGASUS_READER", "0")
-os.environ["PEGASUS_MEMORY"] = tempfile.mktemp(suffix=".json")
+os.environ.setdefault("HIDE_AND_SEEK_READER", "0")
+os.environ["HIDE_AND_SEEK_MEMORY"] = tempfile.mktemp(suffix=".json")
 
 from arena_kit.cli import load_env  # noqa: E402
 
 load_env()
 from arena_kit.data import DataPackage  # noqa: E402
 
-import pegasus.memory as memory  # noqa: E402
+import hide_and_seek.memory as memory  # noqa: E402
 
-memory.FILE = Path(os.environ["PEGASUS_MEMORY"])
-from pegasus.agent import PegasusAgent  # noqa: E402
-from pegasus.play import play_waves  # noqa: E402
+memory.FILE = Path(os.environ["HIDE_AND_SEEK_MEMORY"])
+from hide_and_seek.agent import HideAndSeekAgent  # noqa: E402
+from hide_and_seek.play import play_waves  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-# the practice case files: PEGASUS_CASES, else the copy in this repository (analysis/cases-practice.json)
-CASES_FILE = Path(os.environ.get("PEGASUS_CASES") or REPO / "analysis" / "cases-practice.json").expanduser()
+# the practice case files: HIDE_AND_SEEK_CASES, else the copy in this repository (analysis/cases-practice.json)
+CASES_FILE = Path(os.environ.get("HIDE_AND_SEEK_CASES") or REPO / "analysis" / "cases-practice.json").expanduser()
 CASES = {c["case_id"]: c for c in json.loads(CASES_FILE.read_text(encoding="utf-8"))}
 # the data package: ARENA_DATA, else data/package (the kit's layout), else this repository's data/
 DATA = next((d for d in (os.environ.get("ARENA_DATA"), "data/package", str(REPO / "data"))
@@ -120,7 +120,7 @@ def main():
     pkg = DataPackage(DATA)
     arena = FakeArena(["case:P04", "case:P07"], cap_s=96)  # closing fires ~6 s in (cap - 90 s)
     t0 = time.time()
-    results = play_waves(arena, lambda: PegasusAgent(pkg), waves=1, parallel=10, poll=1.0)
+    results = play_waves(arena, lambda: HideAndSeekAgent(pkg), waves=1, parallel=10, poll=1.0)
     took = time.time() - t0
     ok = True
     for cid, r in results.items():

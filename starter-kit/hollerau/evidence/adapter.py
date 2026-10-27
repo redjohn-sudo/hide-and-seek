@@ -1,14 +1,14 @@
-"""Adapter for Pegasus (`hollerau/pegasus/`, Vincent's agent): our claims and planner hints, without touching its code.
+"""Adapter for Hide and Seek (`hollerau/hide_and_seek/`, Vincent's agent): our claims and planner hints, without touching its code.
 
-pegasus_claims(case, package, pegasus_claims_list, used=None, supplier=None, used_by_supplier=None) -> list[Claim]
-    The union of our claims (`compile_evidence`) and Pegasus candidates (`Claims.candidates` / `rival_claim` dicts:
-    `refs`, `sentence`, optional `rival`), each ID once, strongest first. Our filters apply to the Pegasus ones:
+hide_and_seek_claims(case, package, hide_and_seek_claims_list, used=None, supplier=None, used_by_supplier=None) -> list[Claim]
+    The union of our claims (`compile_evidence`) and Hide and Seek candidates (`Claims.candidates` / `rival_claim` dicts:
+    `refs`, `sentence`, optional `rival`), each ID once, strongest first. Our filters apply to the Hide and Seek ones:
     no should-cost unless clearly below the price at stake, no volume growth in a capacity case or to a saturated
     supplier, scorecards only past our thresholds, no index claim when the increase is justified, and every claim
     must pass `check()` - except a rival's session offer (`offer:`), which the arena checks itself. At most 3 per
     message: the caller slices.
     Memory, as the arena counts (api.md): a rival's `offer:` or `quote:` counts once per supplier, every other ID
-    once per case. `used`: IDs already sent in this case (global); it may also hold Pegasus `pick` entries
+    once per case. `used`: IDs already sent in this case (global); it may also hold Hide and Seek `pick` entries
     `(supplier, refs)` for rival offers. `used_by_supplier`: {supplier: rival IDs already sent to it}. `supplier`:
     who this message goes to - then no card, news, letter or contract about another supplier, and no rival offer or
     quote already sent to it or its own. Only a candidate whose refs are all `offer:` strings skips `check()`; one
@@ -48,7 +48,7 @@ FAMILY = {
     "po": "orders",
     "news": "forecast_cost_news",
 }
-FIGURES = [  # (family, ID prefix, regex on a Pegasus sentence, unit)
+FIGURES = [  # (family, ID prefix, regex on a Hide and Seek sentence, unit)
     ("index", "idx", r"changed (-?[\d.]+)%", "%"),
     ("notice", "doc", r"gives (\d+) days", "days"),
     ("forecast_cost_news", "cost", r"is ([\d.]+) EUR", "EUR"),
@@ -61,7 +61,7 @@ SUPPORTS = {"index": "price", "notice": "effective_date", "quote": "price", "ord
 
 
 def as_claim(candidate: dict) -> Claim:
-    """A Pegasus candidate as a `Claim`: family from its first ID, figure and unit read from its sentence."""
+    """A Hide and Seek candidate as a `Claim`: family from its first ID, figure and unit read from its sentence."""
     refs, text = list(candidate["refs"]), candidate["sentence"]
     prefix = refs[0].split(":", 1)[0]
     family = FAMILY.get(prefix, prefix)
@@ -85,7 +85,7 @@ def _justified(case: dict, data, facts: dict) -> bool:
 
 
 def _keep(case: dict, data, facts: dict, claim: Claim, justified: bool) -> bool:
-    """Our filters, applied to one Pegasus claim (not a rival's offer)."""
+    """Our filters, applied to one Hide and Seek claim (not a rival's offer)."""
     if not check(claim, facts):
         return False
     prefix = claim.ids[0].split(":", 1)[0]
@@ -122,13 +122,13 @@ def _supplier_no(supplier) -> str:
 
 
 def _ids_of(claim) -> list[str]:
-    """The IDs of a sent claim (`Claim` or Pegasus dict); [] if they are not all strings."""
+    """The IDs of a sent claim (`Claim` or Hide and Seek dict); [] if they are not all strings."""
     ids = claim.ids if isinstance(claim, Claim) else claim.get("refs") if isinstance(claim, dict) else None
     return list(ids) if isinstance(ids, list | tuple) and all(isinstance(i, str) for i in ids) else []
 
 
 def _offers_sent(supplier, used: set, used_by_supplier: dict) -> set[str]:
-    """Rival IDs already cited to `supplier`: `used_by_supplier`, plus Pegasus `pick` entries `(supplier, refs)`."""
+    """Rival IDs already cited to `supplier`: `used_by_supplier`, plus Hide and Seek `pick` entries `(supplier, refs)`."""
     sent = used_by_supplier.get(supplier) if supplier is not None else None
     out = {i for i in sent if isinstance(i, str)} if isinstance(sent, set | frozenset | list | tuple) else set()
     for entry in used:
@@ -138,7 +138,7 @@ def _offers_sent(supplier, used: set, used_by_supplier: dict) -> set[str]:
 
 
 def remember(claims, supplier, used: set, used_by_supplier: dict | None = None) -> None:
-    """Record a sent message: rival IDs per supplier (in `used_by_supplier`, and in `used` as Pegasus `pick` does,
+    """Record a sent message: rival IDs per supplier (in `used_by_supplier`, and in `used` as Hide and Seek `pick` does,
     `(supplier, refs)`), every other ID in `used`. Never raises: a malformed claim or memory is skipped, logged."""
     try:
         for claim in claims or ():
@@ -183,20 +183,20 @@ def _for_recipient(claim: Claim, supplier, facts: dict) -> bool:
     return True
 
 
-def pegasus_claims(
-    case: dict, package, pegasus_claims_list, used=None, supplier=None, used_by_supplier=None
+def hide_and_seek_claims(
+    case: dict, package, hide_and_seek_claims_list, used=None, supplier=None, used_by_supplier=None
 ) -> list[Claim]:
     try:
-        return _pegasus_claims(case, package, pegasus_claims_list, used, supplier, used_by_supplier)
+        return _hide_and_seek_claims(case, package, hide_and_seek_claims_list, used, supplier, used_by_supplier)
     except Exception:
-        log.exception("pegasus_claims failed: our claims only")
+        log.exception("hide_and_seek_claims failed: our claims only")
         try:
             return compile_evidence(case, package) if isinstance(case, dict) else []
         except Exception:
             return []
 
 
-def _pegasus_claims(case, package, candidates, used, supplier, used_by_supplier) -> list[Claim]:
+def _hide_and_seek_claims(case, package, candidates, used, supplier, used_by_supplier) -> list[Claim]:
     case_id = case.get("case_id") if isinstance(case, dict) else None
     used = (
         {u for u in used if isinstance(u, str | tuple)} if isinstance(used, set | frozenset | list | tuple) else set()
@@ -211,7 +211,7 @@ def _pegasus_claims(case, package, candidates, used, supplier, used_by_supplier)
     rivals, pending = [], []
     for candidate in candidates if isinstance(candidates, list | tuple) else ():
         if not _well_formed(candidate):
-            log.warning("%s: malformed Pegasus candidate rejected: %r", case_id, candidate)
+            log.warning("%s: malformed Hide and Seek candidate rejected: %r", case_id, candidate)
         elif _rival_offer(candidate):
             rivals.append(as_claim(candidate))  # admitted before any filter
         else:
@@ -219,12 +219,12 @@ def _pegasus_claims(case, package, candidates, used, supplier, used_by_supplier)
     try:
         facts = facts_of(case, package)
     except Exception:
-        log.exception("%s: facts unavailable, Pegasus claims other than rival offers dropped", case_id)
+        log.exception("%s: facts unavailable, Hide and Seek claims other than rival offers dropped", case_id)
         facts, pending = {}, []
     try:
         justified = _justified(case, package, facts)
     except Exception:
-        log.exception("%s: index check failed, no Pegasus index claim", case_id)
+        log.exception("%s: index check failed, no Hide and Seek index claim", case_id)
         justified = True
     theirs = []
     for candidate in pending:
@@ -233,7 +233,7 @@ def _pegasus_claims(case, package, candidates, used, supplier, used_by_supplier)
             if _keep(case, package, facts, claim, justified):
                 theirs.append(claim)
         except Exception:
-            log.warning("%s: Pegasus candidate skipped: %r", case_id, candidate)
+            log.warning("%s: Hide and Seek candidate skipped: %r", case_id, candidate)
     out, seen = [], {u for u in used if isinstance(u, str)}
     for claim in sorted(ours + rivals + theirs, key=lambda c: RANK.get(c.family, len(RANK))):  # stable: ours first
         ids = set(claim.ids)

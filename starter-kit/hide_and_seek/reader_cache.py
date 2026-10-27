@@ -6,7 +6,7 @@ write). The key includes the prompt version and the model: changing the prompt i
 archive. In the final the arena serves an identical supplier e-mail for an identical message, so a
 repeated reply is read in 0 s instead of up to 20 s on a 60-second budget - and every reading can be
 replayed in front of the jury.
-PEGASUS_READER_CACHE = auto (archive, then network) | replay (archive only) | off
+HIDE_AND_SEEK_READER_CACHE = auto (archive, then network) | replay (archive only) | off
 """
 
 import hashlib
@@ -15,8 +15,8 @@ import os
 import threading
 from pathlib import Path
 
-MODE = os.environ.get("PEGASUS_READER_CACHE", "auto")
-FILE = Path(os.environ.get("PEGASUS_READER_ARCHIVE", "data/reader_archive.json"))
+MODE = os.environ.get("HIDE_AND_SEEK_READER_CACHE", "auto")
+FILE = Path(os.environ.get("HIDE_AND_SEEK_READER_ARCHIVE", "data/reader_archive.json"))
 _lock, _archive = threading.Lock(), {}
 
 

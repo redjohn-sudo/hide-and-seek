@@ -18,8 +18,8 @@ Nevil (avec Claude), samedi 10/10/2026. Branche locale `nevil/evidence` de `holl
 | `notice.py` | `notice` : préavis de la lettre < préavis du contrat, `supports=effective_date` | fait |
 | `quote.py` | `quote` : devis du cas (`refs` + alternative), même pièce, autre fournisseur, **moins cher que le prix en jeu** | fait |
 | `scorecard.py` | `scorecard` : dernière ligne `sc` (déjà glissante sur 12 mois), carte rouge ou orange, ppm > 1 000 ou OTD < 80 % ; ou carte orange avec OTD < 90 % **et** ppm > 500 (P01 : 85,2 %, 712 ppm) | fait |
-| `compare_pegasus.py` | Comparatif hors ligne avec `hollerau/pegasus/` sur les 19 cas (`python -m hollerau.evidence.compare_pegasus`) | fait |
-| `adapter.py` | `pegasus_claims(case, package, pegasus_claims_list, used=None, supplier=None, used_by_supplier=None)`, `remember(...)` et `planner_hints(case, data, standard=None)` pour l'agent de Vincent | fait, **pas encore branché** |
+| `compare_hide_and_seek.py` | Comparatif hors ligne avec `hollerau/hide_and_seek/` sur les 19 cas (`python -m hollerau.evidence.compare_hide_and_seek`) | fait |
+| `adapter.py` | `hide_and_seek_claims(case, package, hide_and_seek_claims_list, used=None, supplier=None, used_by_supplier=None)`, `remember(...)` et `planner_hints(case, data, standard=None)` pour l'agent de Vincent | fait, **pas encore branché** |
 | `index.py` | `index` : fenêtre de 12 mois, une série par claim ; hausse justifiée si pondéré ≥ demande − 1 point | fait |
 | `orders.py` | `orders` : première et dernière commande des 24 derniers mois si le prix a déjà monté de 3 % ou plus ; sinon, sans lettre de prix, la commande la moins chère et la dernière, toutes deux au prix courant ou en dessous ; jamais dans un kit ; sans les lignes `stale_condition` | fait |
 | `forecast_cost_news.py` | `forecast_cost_news` : should-cost (marge > 15 %), lettre du fournisseur « matière couverte » (`doc:`, sans lettre de prix, sans chiffre, `supports=price`), prévision en hausse ≥ 5 %, news qui affaiblissent le fournisseur | fait |
@@ -133,25 +133,25 @@ Chaque correctif a son test, dans `tests/test_families.py`, section « fixes aft
 
 Non traité, par choix : la recherche au centime reste proportionnelle au prix (1,3 s vers 500 000 €, 10 ms pour les prix réels).
 
-## Comparatif hors ligne avec Pegasus (`compare_pegasus.py`)
+## Comparatif hors ligne avec Hide and Seek (`compare_hide_and_seek.py`)
 
 Sans aucune session. Les deux meilleurs paquets sont évalués au même prix (prix demandé, sinon prix courant) avec `arena_kit.cost.total_cost`.
 - **Économie : égalité sur les 19 cas** (même C, must-haves respectés des deux côtés). Les seuls écarts portent sur `lead_time_days` (P05, P06, P09, P10, P12), entre des valeurs qui coûtent la même chose.
-- **Claims** : Pegasus 56, nous 52 (53 depuis la carte orange de P01). Tous passent `check()`, qui ne vérifie que les chiffres, pas la pertinence.
+- **Claims** : Hide and Seek 56, nous 52 (53 depuis la carte orange de P01). Tous passent `check()`, qui ne vérifie que les chiffres, pas la pertinence.
   - L'écart vient de claims que nous écartons volontairement : scorecards verts à OTD sous 90 %, should-cost au-dessus du prix courant ou dans sa marge d'erreur, prévisions de volume en cas capacité ou sous 5 %.
-  - Pegasus n'a ni `orders`, ni lettre de couverture, ni news, ni séries en hausse modérée.
+  - Hide and Seek n'a ni `orders`, ni lettre de couverture, ni news, ni séries en hausse modérée.
 - Suite donnée : une carte orange faible sur les deux critères à la fois est désormais citée (P01).
 
-## Adaptateur pour Pegasus (`adapter.py`)
+## Adaptateur pour Hide and Seek (`adapter.py`)
 
-- **`pegasus_claims(case, package, pegasus_claims_list, used=None, supplier=None, used_by_supplier=None) -> list[Claim]`** : l'union de nos claims et des candidats de Pegasus (`Claims.candidates` / `rival_claim`), chaque ID une seule fois, du plus fort au plus faible (notice, quote, scorecard, index, orders, forecast_cost_news).
-  - Nos filtres s'appliquent aux candidats de Pegasus : should-cost seulement s'il est nettement sous le prix en jeu (P01 : 132,64 € retiré) ; pas de hausse de volume en cas capacité ni chez un fournisseur saturé (P09, P10) ; scorecard seulement au-delà de nos seuils ; pas d'index si la hausse est justifiée ; `check()` obligatoire.
+- **`hide_and_seek_claims(case, package, hide_and_seek_claims_list, used=None, supplier=None, used_by_supplier=None) -> list[Claim]`** : l'union de nos claims et des candidats de Hide and Seek (`Claims.candidates` / `rival_claim`), chaque ID une seule fois, du plus fort au plus faible (notice, quote, scorecard, index, orders, forecast_cost_news).
+  - Nos filtres s'appliquent aux candidats de Hide and Seek : should-cost seulement s'il est nettement sous le prix en jeu (P01 : 132,64 € retiré) ; pas de hausse de volume en cas capacité ni chez un fournisseur saturé (P09, P10) ; scorecard seulement au-delà de nos seuils ; pas d'index si la hausse est justifiée ; `check()` obligatoire.
   - Exception : l'offre d'un rival (`offer:`) passe telle quelle, car l'arène la vérifie elle-même.
   - **Mémoire, comme l'arène compte** : une offre `offer:` ou un devis `quote:` d'un rival compte une fois **par fournisseur**, tout autre ID une fois par cas.
   - **Destinataire** (`supplier`) : jamais la carte, la news, la lettre ni le contrat d'un autre fournisseur (une news de marché, sans fournisseur, va à tous). Jamais son propre devis ou sa propre offre.
   - Seul un candidat dont toutes les refs sont des chaînes `offer:` est dispensé de `check()`. Des refs qui ne sont pas une liste de chaînes font rejeter le candidat.
   - Ne plante jamais, `remember` compris (repli : nos claims). Une erreur dans les filtres n'enlève pas les offres rivales, admises avant tout filtre.
-    - `used` : la mémoire globale des IDs déjà envoyés. Elle accepte aussi les entrées `(fournisseur, refs)` que `pick` de Pegasus y range pour les offres rivales.
+    - `used` : la mémoire globale des IDs déjà envoyés. Elle accepte aussi les entrées `(fournisseur, refs)` que `pick` de Hide and Seek y range pour les offres rivales.
     - `used_by_supplier` : {fournisseur : offres déjà envoyées}.
     - `supplier` : le destinataire du message. Une offre lui est épargnée s'il l'a déjà reçue, ou si c'est la sienne.
     - `remember(claims, supplier, used, used_by_supplier=None)` enregistre un message envoyé dans ce format.
@@ -159,10 +159,10 @@ Sans aucune session. Les deux meilleurs paquets sont évalués au même prix (pr
   - Ne plante jamais : en cas d'échec, nos claims seuls.
 - **`planner_hints(case, data, standard=None) -> dict`** : `levers` (en €, triés), `best_package`, `reference_price`, `c_alt`, `price_floor_hint` / `confidence` / `reason`, `asked_pct`, `increase_justified`, et par fournisseur `committee_above_pct`, `cash_need`, `material_hedged_until`, `full_order_book`, `free_capacity`, `single_source`, avec les IDs sources (contexte, à ne pas citer en plus).
 
-**Intégration pour Vincent** (`hollerau/pegasus/agent.py`, à sa place dans `_message`, non modifié ici) : remplacer `chosen = self.claims.pick(sid, part, price, st["drivers"], rivals) if self.claims else []` par
+**Intégration pour Vincent** (`hollerau/hide_and_seek/agent.py`, à sa place dans `_message`, non modifié ici) : remplacer `chosen = self.claims.pick(sid, part, price, st["drivers"], rivals) if self.claims else []` par
 
 ```python
-chosen = pegasus_claims(
+chosen = hide_and_seek_claims(
     case,
     self.pkg,
     [x for r in rivals for x in self.claims.rival_claim(*r)] + self.claims.candidates(sid, part, price, st["drivers"]),
@@ -173,7 +173,7 @@ remember(chosen, sid, self.claims.used)
 chosen = [{"refs": c.ids, "sentence": c.sentence} for c in chosen]
 ```
 
-avec `from hollerau.evidence.adapter import pegasus_claims, remember`. `remember` écrit dans `self.claims.used`, au format de `pick` : `(fournisseur, refs)` pour une offre rivale, l'ID seul sinon. La même offre rivale peut donc être citée une fois à chaque autre fournisseur, comme avec `pick` (test : `test_p05_same_rival_offer_for_two_suppliers`).
+avec `from hollerau.evidence.adapter import hide_and_seek_claims, remember`. `remember` écrit dans `self.claims.used`, au format de `pick` : `(fournisseur, refs)` pour une offre rivale, l'ID seul sinon. La même offre rivale peut donc être citée une fois à chaque autre fournisseur, comme avec `pick` (test : `test_p05_same_rival_offer_for_two_suppliers`).
 
 ## À voir avec Icham
 

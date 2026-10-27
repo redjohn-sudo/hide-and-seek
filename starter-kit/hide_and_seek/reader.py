@@ -19,10 +19,10 @@ import httpx
 
 from . import reader_cache
 
-log = logging.getLogger("pegasus")
+log = logging.getLogger("hide_and_seek")
 
-ENABLED = os.environ.get("PEGASUS_READER", "0") == "1"
-BUDGET_S = float(os.environ.get("PEGASUS_READER_BUDGET_S", "20"))
+ENABLED = os.environ.get("HIDE_AND_SEEK_READER", "0") == "1"
+BUDGET_S = float(os.environ.get("HIDE_AND_SEEK_READER_BUDGET_S", "20"))
 
 TYPES = {
     "wants_faster_payment": "it says faster/shorter payment would help it or let it lower the price",

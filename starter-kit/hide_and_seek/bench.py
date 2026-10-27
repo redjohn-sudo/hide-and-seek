@@ -1,6 +1,6 @@
 """Sandbox bench (free, outside the practice quota): play D01 and D02 `n` times each at once
-and print the mean score per case. Variants via PEGASUS_* environment variables.
-uv run python -m pegasus.bench 3"""
+and print the mean score per case. Variants via HIDE_AND_SEEK_* environment variables.
+uv run python -m hide_and_seek.bench 3"""
 
 import logging
 import os
@@ -11,7 +11,7 @@ from arena_kit import ArenaClient
 from arena_kit.cli import load_env
 from arena_kit.data import DataPackage
 
-from .agent import PegasusAgent
+from .agent import HideAndSeekAgent
 from .play import play_cases
 
 
@@ -28,7 +28,7 @@ def main():
 
     def one(cid):
         try:
-            return cid, play_case(RemoteTable(client), cid, PegasusAgent(pkg))
+            return cid, play_case(RemoteTable(client), cid, HideAndSeekAgent(pkg))
         except Exception as e:
             return cid, e
 
@@ -37,7 +37,7 @@ def main():
     by = {}
     for cid, r in res:
         by.setdefault(cid, []).append(0.0 if isinstance(r, Exception) else (r.get("score") or 0.0))
-    tag = " ".join(f"{k}={v}" for k, v in os.environ.items() if k.startswith("PEGASUS_"))
+    tag = " ".join(f"{k}={v}" for k, v in os.environ.items() if k.startswith("HIDE_AND_SEEK_"))
     print(f"[{tag or 'default'}] " + "  ".join(
         f"{c}: mean={statistics.mean(v):.3f} {[round(x, 3) for x in v]}" for c, v in sorted(by.items())))
 

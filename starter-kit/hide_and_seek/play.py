@@ -23,9 +23,9 @@ from arena_kit.play import (
     standing,
 )
 
-log = logging.getLogger("pegasus")
-# total wait for the opening readings (PEGASUS_READER=1) before the workers start
-OPEN_READ_BUDGET_S = float(os.environ.get("PEGASUS_OPEN_READ_BUDGET_S", "12"))
+log = logging.getLogger("hide_and_seek")
+# total wait for the opening readings (HIDE_AND_SEEK_READER=1) before the workers start
+OPEN_READ_BUDGET_S = float(os.environ.get("HIDE_AND_SEEK_OPEN_READ_BUDGET_S", "12"))
 
 
 def closing(agent, case, threads):

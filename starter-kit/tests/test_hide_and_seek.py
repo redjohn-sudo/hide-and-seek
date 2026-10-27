@@ -1,4 +1,4 @@
-"""Offline tests for the pegasus agent: economics, reader, guard paths, the per-thread player.
+"""Offline tests for the hide_and_seek agent: economics, reader, guard paths, the per-thread player.
 
 No arena, no LLM: the practice case files of this repository (analysis/cases-practice.json) and its
 data package (data/), fake tables for the player."""
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not CASES_FILE.is_file(), reason="no practice ca
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     """Supplier memory and the reader archive in a temporary folder; reader off unless a test turns it on."""
-    from pegasus import memory, reader, reader_cache
+    from hide_and_seek import memory, reader, reader_cache
 
     monkeypatch.setattr(memory, "FILE", tmp_path / "memory.json")
     monkeypatch.setattr(memory, "_mem", {})
@@ -61,14 +61,14 @@ def buyer(terms_list, body="..."):
 
 # -- economics ---------------------------------------------------------------------------------
 def test_implied_rate_from_a_payment_pair():
-    from pegasus.economics import implied_rate
+    from hide_and_seek.economics import implied_rate
 
     r = implied_rate([{"unit_price": 373.88, "payment_days": 90}, {"unit_price": 368.68, "payment_days": 14}])
     assert r == pytest.approx(0.066, abs=0.002)
 
 
 def test_implied_rate_tolerates_missing_or_null_fields():
-    from pegasus.economics import implied_rate
+    from hide_and_seek.economics import implied_rate
 
     # regression: a sheet without payment_days raised KeyError (economics.py:138)
     assert implied_rate([{"unit_price": 373.88, "payment_days": 90}, {"unit_price": 368.68}]) is None
@@ -82,7 +82,7 @@ def test_implied_rate_tolerates_missing_or_null_fields():
 
 
 def test_implied_rate_ignores_implausible_rates():
-    from pegasus.economics import implied_rate
+    from hide_and_seek.economics import implied_rate
 
     assert implied_rate([{"unit_price": 100.0, "payment_days": 90}, {"unit_price": 50.0, "payment_days": 14}]) is None
 
@@ -102,13 +102,13 @@ def test_implied_rate_ignores_implausible_rates():
     ({"type": "free_capacity", "value": None}, "We have free capacity.", "free capacity", (True, None)),
 ])
 def test_reader_validate(sig, line, quote, expect):
-    from pegasus.reader import validate
+    from hide_and_seek.reader import validate
 
     assert validate(sig, line, quote) == expect
 
 
 def test_reader_keywords_only_never_calls_the_llm(monkeypatch):
-    from pegasus import reader
+    from hide_and_seek import reader
 
     monkeypatch.setattr(reader, "ENABLED", True)
     found = reader.read("We cannot go any lower. Faster payment would help our cash flow.", llm=False)
@@ -128,11 +128,11 @@ def p04_thread(body, price=4.90, status="open"):
 
 @pytest.mark.parametrize("written", ["4.80 EUR", "4,80 EUR", "EUR 4.80", "4.80 €", "€ 4,80"])
 def test_take_its_word_reads_every_price_format(cases, pkg, written):
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
     case = cases["case:P04"]
     threads = {P04: p04_thread(f"We hold our terms. I can offer you {written} per unit on these terms.")}
-    out = PegasusAgent(pkg).decide(case, threads, P04)
+    out = HideAndSeekAgent(pkg).decide(case, threads, P04)
     sheets = out["message"]["term_sheets"]
     assert len(sheets) == 1 and sheets[0]["terms"]["unit_price"] == 4.80
     assert sheets[0]["terms"]["payment_days"] == 30 and sheets[0]["terms"]["contract_months"] == 24
@@ -145,9 +145,9 @@ def test_take_its_word_reads_every_price_format(cases, pkg, written):
     "I can offer 3.00 EUR for a far larger volume.",     # out of the plausible band
 ])
 def test_take_its_word_ignores_other_prices(cases, pkg, body):
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     case = cases["case:P04"]
     threads = {P04: p04_thread(body)}
     st = agent._prepare(case) or agent._thread(case, P04, threads[P04])
@@ -157,9 +157,9 @@ def test_take_its_word_ignores_other_prices(cases, pkg, body):
 def test_seen_grows_once_per_supplier_message(cases, pkg):
     """Regression (agent.py:427): every decision appended C_s - the 1-second wait loop and the resync
     after a refused close read as "it stopped moving" (false stall close, false nudge)."""
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     case = cases["case:P04"]
     threads = {P04: [supplier(P04, P04_OPEN)]}
     for _ in range(4):  # the same reply decided again and again
@@ -174,9 +174,9 @@ def test_seen_grows_once_per_supplier_message(cases, pkg):
 
 def test_no_false_stall_close_on_repeated_decisions(cases, pkg):
     """Three re-decisions on the same moving reply must not close the case as a stall."""
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     case = cases["case:P04"]
     events = [supplier(P04, {**P04_OPEN, "unit_price": 4.95})]
     for i, p in enumerate((4.90, 4.85, 4.80), 1):
@@ -194,13 +194,13 @@ def test_no_false_stall_close_on_repeated_decisions(cases, pkg):
 def test_decide_never_calls_the_llm_under_the_lock(cases, pkg, monkeypatch):
     """Regression (agent.py:440): a reply not read before the lock was read by the LLM under it; now
     keywords first, the LLM's reading taken once `observe` has it."""
-    from pegasus import reader
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek import reader
+    from hide_and_seek.agent import HideAndSeekAgent
 
     monkeypatch.setattr(reader, "ENABLED", True)
     calls = []
     monkeypatch.setattr(reader, "_llm", lambda lines: calls.append(lines) or {"signals": []})
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     case = cases["case:P04"]
     body = "Please find our offer attached.\nWe have free capacity this year."
     threads = {P04: [supplier(P04, P04_OPEN, body=body)]}
@@ -216,13 +216,13 @@ def test_decide_never_calls_the_llm_under_the_lock(cases, pkg, monkeypatch):
 
 
 def test_floored_raises_prices_and_drops_dear_packages(cases, pkg):
-    from pegasus import economics as eco
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek import economics as eco
+    from hide_and_seek.agent import HideAndSeekAgent
 
     case = cases["case:P02"]
     sid = case["suppliers"][0]
     opening = {"unit_price": 373.88, "payment_days": 90, "index_clause": None}
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     agent._prepare(case)
     st = agent._thread(case, sid, [supplier(sid, opening)])
     assert st["std"].get("_floor"), "P02 is a strategic case with a should-cost"
@@ -239,7 +239,7 @@ def test_floored_raises_prices_and_drops_dear_packages(cases, pkg):
 
 
 def test_sync_body_without_sheets_drops_attached_wording(cases):
-    from pegasus.agent import sync_body
+    from hide_and_seek.agent import sync_body
 
     case = cases["case:P04"]
     body = ("Dear Sir or Madam,\n\nthank you.\nEach of the attached packages works for us; please choose the one that "
@@ -252,7 +252,7 @@ def test_sync_body_without_sheets_drops_attached_wording(cases):
 
 
 def test_sync_body_follows_the_sheets_as_sent(cases):
-    from pegasus.agent import sync_body
+    from hide_and_seek.agent import sync_body
 
     case = cases["case:P04"]
     drafted = [{**P04_OPEN, "unit_price": 4.10, "contract_months": 36}, {**P04_OPEN, "unit_price": 4.10}]
@@ -268,9 +268,9 @@ def test_sync_body_follows_the_sheets_as_sent(cases):
 def test_every_message_leaves_through_the_guard(cases, pkg, monkeypatch):
     """Messages written outside `_send` (take its word, mirror, clause probe, questions after a final,
     the nudge line) now pass `guard.check` at the exit."""
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
-    agent = PegasusAgent(pkg)
+    agent = HideAndSeekAgent(pkg)
     case = cases["case:P04"]
     threads = {P04: [supplier(P04, P04_OPEN)]}
     body = "Thank you.\nThis is urgent for us.\nAs shown in news:does-not-exist prices fell.\nPlease confirm."
@@ -285,9 +285,9 @@ def test_every_message_leaves_through_the_guard(cases, pkg, monkeypatch):
 
 
 def test_internal_keys_never_leave(cases, pkg):
-    from pegasus.agent import PegasusAgent
+    from hide_and_seek.agent import HideAndSeekAgent
 
-    out = PegasusAgent(pkg).decide(cases["case:P04"], {P04: [supplier(P04, P04_OPEN)]}, P04)
+    out = HideAndSeekAgent(pkg).decide(cases["case:P04"], {P04: [supplier(P04, P04_OPEN)]}, P04)
     assert not [k for k in out["message"] if k.startswith("_")]
 
 
@@ -341,31 +341,31 @@ class FakeTable:
 def test_single_thread_send_failure_closes_the_case(cases, pkg, status):
     """Regression (play.py:116): a 422 at sending made the only worker return without closing - the
     session stayed open (no deal). Any abnormal end of the last worker now runs the closing move."""
-    from pegasus.agent import PegasusAgent
-    from pegasus.play import play_case
+    from hide_and_seek.agent import HideAndSeekAgent
+    from hide_and_seek.play import play_case
 
     case = cases["case:P04"]
     table = FakeTable(case, {P04: [supplier(P04, {**P04_OPEN, "unit_price": 4.60})]}, fail={1: status})
-    result = play_case(table, case["case_id"], PegasusAgent(pkg))
+    result = play_case(table, case["case_id"], HideAndSeekAgent(pkg))
     assert table.closed is not None
     assert table.closed[1]["type"] in ("accept", "walk_away")
     assert result.get("supplier_id") == P04
 
 
 def test_rfq_send_failure_on_one_thread_lets_the_others_finish(cases, pkg):
-    from pegasus.agent import PegasusAgent
-    from pegasus.play import play_case
+    from hide_and_seek.agent import HideAndSeekAgent
+    from hide_and_seek.play import play_case
 
     case = dict(cases["case:P04"], suppliers=[P04, "sup:99999"])
     other = "sup:99999"
     table = FakeTable(case, {P04: [supplier(P04, {**P04_OPEN, "unit_price": 4.60})],
                              other: [supplier(other, {**P04_OPEN, "unit_price": 4.70})]}, fail={1: 422})
-    play_case(table, case["case_id"], PegasusAgent(pkg))
+    play_case(table, case["case_id"], HideAndSeekAgent(pkg))
     assert table.closed is not None  # the case ends closed, whichever thread got the 422
 
 
 def test_opening_reads_run_in_parallel_within_a_budget():
-    from pegasus.play import observe_openings
+    from hide_and_seek.play import observe_openings
 
     seen, lock = [], threading.Lock()
 
@@ -386,12 +386,12 @@ def test_opening_reads_run_in_parallel_within_a_budget():
 
 
 def test_dryrun_final_finds_its_cases_without_home_paths():
-    src = (REPO / "starter-kit" / "pegasus" / "dryrun_final.py").read_text(encoding="utf-8")
-    assert "~/tacto" not in src and "PEGASUS_CASES" in src
+    src = (REPO / "starter-kit" / "hide_and_seek" / "dryrun_final.py").read_text(encoding="utf-8")
+    assert "~/tacto" not in src and "HIDE_AND_SEEK_CASES" in src
 
 
-if os.environ.get("PEGASUS_SLOW_TESTS") == "1":  # pragma: no cover - the full offline rehearsal (about 10 s)
+if os.environ.get("HIDE_AND_SEEK_SLOW_TESTS") == "1":  # pragma: no cover - the full offline rehearsal (about 10 s)
     def test_dryrun_final_green():
-        from pegasus import dryrun_final
+        from hide_and_seek import dryrun_final
 
         assert dryrun_final.main() == 0

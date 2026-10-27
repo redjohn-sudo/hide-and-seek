@@ -12,10 +12,10 @@ import os
 import re
 import time
 
-log = logging.getLogger("pegasus")
+log = logging.getLogger("hide_and_seek")
 
-ENABLED = os.environ.get("PEGASUS_LLM_PROSE", "0") == "1"
-BUDGET_S = float(os.environ.get("PEGASUS_LLM_BUDGET_S", "20"))
+ENABLED = os.environ.get("HIDE_AND_SEEK_LLM_PROSE", "0") == "1"
+BUDGET_S = float(os.environ.get("HIDE_AND_SEEK_LLM_BUDGET_S", "20"))
 
 SYSTEM = """You write the buyer's next e-mail in a B2B procurement negotiation (buyer: Hollerau
 Pumpenwerke GmbH, Purchasing). The numbers are decided; you only write the words.

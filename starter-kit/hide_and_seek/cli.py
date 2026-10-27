@@ -1,6 +1,6 @@
-"""uv run python -m pegasus.cli practice [P01 P04 ...] | sandbox D01 | final
+"""uv run python -m hide_and_seek.cli practice [P01 P04 ...] | sandbox D01 | final
 
-Plays with the pegasus agent and prints one line per case (score, C) plus the replay links.
+Plays with the hide_and_seek agent and prints one line per case (score, C) plus the replay links.
 `--playbook file.json`: per case {"target_c": ...} learnt from practice results.
 """
 
@@ -15,13 +15,13 @@ from arena_kit.cli import load_env
 from arena_kit.data import DataPackage
 from arena_kit.play import hosted
 
-from .agent import PegasusAgent
+from .agent import HideAndSeekAgent
 from .play import play_cases, play_waves
 
 
 def main(argv=None):
     load_env()
-    p = argparse.ArgumentParser(prog="pegasus")
+    p = argparse.ArgumentParser(prog="hide_and_seek")
     p.add_argument("set", choices=["practice", "sandbox", "final"])
     p.add_argument("cases", nargs="*", help="e.g. P01 P04 (default: every hosted case)")
     p.add_argument("--parallel", type=int, default=5)
@@ -43,7 +43,7 @@ def main(argv=None):
         pk.__dict__["_ids"] = index  # a cached_property lives in the instance's __dict__
         return pk
     playbook = json.load(open(a.playbook)) if a.playbook else {}
-    new_agent = lambda: PegasusAgent(package(), playbook, a.push_after_final)  # noqa: E731
+    new_agent = lambda: HideAndSeekAgent(package(), playbook, a.push_after_final)  # noqa: E731
     client = ArenaClient()
     if a.set == "final":
         results = play_waves(client, new_agent, parallel=a.parallel)
